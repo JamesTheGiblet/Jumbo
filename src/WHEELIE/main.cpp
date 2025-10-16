@@ -1,6 +1,14 @@
 #include <Arduino.h>
 #include <Adafruit_VL53L0X.h>
 #include <EEPROM.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include "emergent_signal.h"
+
+// Include emergent signal and context detection implementation
+#include "../emergent_signal.cpp"
+#include "../context_detection.cpp"
 
 // == LED PINS (4-PIN RGB LED) ==
 // Left LED
@@ -20,7 +28,6 @@ const int PWM_CH_R_R = 7;
 const int PWM_CH_R_G = 8;
 const int PWM_CH_R_B = 9;
 
-
 // == SENSOR PIN ==
 const int MOTION_SENSOR_PIN = 27;
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
@@ -36,6 +43,10 @@ const int PWM_CHANNEL_RIGHT1 = 2;
 const int PWM_CHANNEL_RIGHT2 = 3;
 const int PWM_FREQ = 5000;
 const int PWM_RESOLUTION = 8;
+
+// Buzzer pin for audio signals (set to -1 if no buzzer)
+const int BUZZER_PIN = -1;  // No buzzer on WHEELIE by default
+bool hasBuzzer = false;
 
 // ═══════════════════════════════════════════════════════════
 // 🧬 EVOLUTIONARY PARAMETERS - THE ROBOT'S GENOME
@@ -63,36 +74,22 @@ struct EvolvingGenome {
   unsigned long generation = 0;
 };
 
-// 🗣️ EMERGENT LANGUAGE STRUCTURES
-const int MAX_VOCABULARY = 50;
-const int BUZZER_PIN = 13; // Set to actual pin if you have a buzzer
+// ═══════════════════════════════════════════════════════════
+// 🌊 EMERGENT COMMUNICATION SYSTEM
+// ═══════════════════════════════════════════════════════════
 
-struct SignalWord {
-  int contextType;           // 0=obstacle, 1=success, 2=trapped, 3=clear, 4=evolving
-  int emotionalValence;      // -100 to +100
-  int generation;           // When this signal was created
-  float utility;            // 0.0-1.0 how useful this signal is
-  unsigned long timesUsed;
-  int patternLength;
-  int tonePattern[6];       // Frequencies for each tone
-  int durationPattern[6];   // Durations for each tone
-  uint8_t r, g, b;          // Associated RGB color for this signal
-};
+// Global emergent signal generator
+EmergentSignalGenerator signalGenerator;
 
-struct EmotionalState {
-  int frustrationLevel = 0;   // 0-100
-  int confidenceLevel = 50;   // 0-100  
-  int curiosityLevel = 50;    // 0-100
-  bool isDistressed = false;
-  bool isTriumphant = false;
-  unsigned long lastCommunication = 0;
-};
+// External variables for context detection (defined in context_detection.cpp)
+int distance_cm = 0;
+bool motionDetected = false;
+bool isMoving = false;
+bool taskInProgress = false;
+bool taskSuccessful = false;
+unsigned long lastPeerContact = 0;
 
-// Global variables for emergent language
-SignalWord vocabulary[MAX_VOCABULARY];
-int vocabularySize = 0;
-EmotionalState currentState;
-bool hasBuzzer = false;
+#define WHEELIE_BOT  // Enable WHEELIE-specific context detection
 
 // ═══════════════════════════════════════════════════════════
 // 🧠 LEARNED STRATEGIES - THE ROBOT'S MEMORY
@@ -110,6 +107,43 @@ struct LearnedStrategy {
 const int MAX_STRATEGIES = 20;
 LearnedStrategy strategyLibrary[MAX_STRATEGIES];
 int strategyCount = 0;
+
+// ═══════════════════════════════════════════════════════════
+// 📡 EMERGENT ESP-NOW COMMUNICATION SYSTEM
+// ═══════════════════════════════════════════════════════════
+
+// Bot type definitions for emergent system
+enum BotType {
+  BOT_SPEEDIE = 0,
+  BOT_WHEELIE = 1
+};
+
+// Simple peer structure for emergent communication
+struct SwarmPeer {
+  uint8_t macAddress[6];
+  bool isActive = false;
+  unsigned long lastSeen = 0;
+  BotType botType = BOT_WHEELIE;
+};
+
+const int MAX_SWARM_PEERS = 8;
+SwarmPeer swarmPeers[MAX_SWARM_PEERS];
+
+// Simple peer tracking for emergent system
+int activePeerCount = 0;
+BotType myBotType = BOT_WHEELIE;
+uint8_t sequenceNumber = 0;
+
+// Message timers
+unsigned long lastCommunicationTime = 0;
+
+// Swarm coordination state
+bool hasLeader = false;
+uint8_t leaderMac[6] = {0};
+
+// ESP-NOW buffers for emergent communication
+EmergentMessage outgoingEmergentMessage;
+EmergentMessage incomingEmergentMessage;
 
 // ═══════════════════════════════════════════════════════════
 // 🌱 EVOLUTION STATE
@@ -158,7 +192,17 @@ int trappedAttempts = 0;
 const int MAX_TRAPPED_ATTEMPTS = 3;
 
 // ═══════════════════════════════════════════════════════════
-// 🗣️ EMERGENT LANGUAGE & PERSISTENCE FUNCTIONS
+// � FUNCTION FORWARD DECLARATIONS  
+// ═══════════════════════════════════════════════════════════
+// Emergent communication functions
+void communicateCurrentState();
+void updateSignalFeedback(bool wasSuccessful);
+void onEmergentMessageReceived(const uint8_t *mac, const uint8_t *incomingData, int len);
+void displaySignalOnLEDs(SignalWord* signal, EnvironmentalContext context, EmotionalState emotion);
+int findPeer(const uint8_t* mac);
+
+// ═══════════════════════════════════════════════════════════
+// �🗣️ EMERGENT LANGUAGE & PERSISTENCE FUNCTIONS
 //  PERSISTENT MEMORY FUNCTIONS
 // ═══════════════════════════════════════════════════════════
 
@@ -209,260 +253,7 @@ void loadMetricsFromEEPROM() {
   EEPROM.get(METRICS_ADDRESS, metrics);
 }
 
-void saveVocabularyToEEPROM() {
-  for (int i = 0; i < vocabularySize && i < MAX_VOCABULARY; i++) {
-    EEPROM.put(VOCABULARY_ADDRESS + (i * sizeof(SignalWord)), vocabulary[i]);
-  }
-  EEPROM.put(VOCABULARY_ADDRESS + (MAX_VOCABULARY * sizeof(SignalWord)), vocabularySize);
-  EEPROM.commit();
-  Serial.print("💾 Saved ");
-  Serial.print(vocabularySize);
-  Serial.println(" words to vocabulary");
-}
-
-void loadVocabularyFromEEPROM() {
-  EEPROM.get(VOCABULARY_ADDRESS + (MAX_VOCABULARY * sizeof(SignalWord)), vocabularySize);
-  if (vocabularySize > MAX_VOCABULARY) vocabularySize = 0;
-  
-  for (int i = 0; i < vocabularySize; i++) {
-    EEPROM.get(VOCABULARY_ADDRESS + (i * sizeof(SignalWord)), vocabulary[i]);
-  }
-  Serial.print("📖 Loaded ");
-  Serial.print(vocabularySize);
-  Serial.println(" words from vocabulary");
-}
-
-// Generate a new signal based on current context and emotional state
-void createNewSignal(int contextType, int emotionalValence) {
-  if (vocabularySize >= MAX_VOCABULARY) {
-    // Vocabulary full - replace least useful word
-    int worstIndex = 0;
-    float worstUtility = vocabulary[0].utility;
-    for (int i = 1; i < vocabularySize; i++) {
-      if (vocabulary[i].utility < worstUtility) {
-        worstUtility = vocabulary[i].utility;
-        worstIndex = i;
-      }
-    }
-    vocabularySize = worstIndex; // Will overwrite this one
-  }
-  
-  SignalWord newWord;
-  newWord.contextType = contextType;
-  newWord.emotionalValence = emotionalValence;
-  newWord.generation = currentGenome.generation;
-  newWord.utility = 0.5; // Start neutral
-  newWord.timesUsed = 0;
-  
-  // Generate pattern based on context and emotion
-  // More distress = faster, higher pitched, more chaotic
-  // More success = slower, melodic, rhythmic
-  
-  newWord.patternLength = random(2, 7); // 2-6 elements
-  
-  // Generate a color based on the emotional valence
-  if (emotionalValence < -30) { // Distress/frustration -> Reds/Oranges
-    newWord.r = random(20, 50);
-    newWord.g = random(0, 10);
-    newWord.b = random(0, 5);
-  } else if (emotionalValence > 30) { // Success/positive -> Greens/Blues/Cyans
-    newWord.r = random(0, 5);
-    newWord.g = random(20, 50);
-    newWord.b = random(15, 40);
-  } else { // Neutral/booting/curious -> Purples/Yellows/Whites
-    newWord.r = random(10, 30);
-    newWord.g = random(10, 30);
-    newWord.b = random(10, 30);
-  }
-  for (int i = 0; i < newWord.patternLength; i++) {
-    if (emotionalValence < -30) {
-      // Distress signal - fast, high, irregular
-      newWord.tonePattern[i] = random(1500, 3000);
-      newWord.durationPattern[i] = random(50, 150);
-    } else if (emotionalValence > 30) {
-      // Success signal - melodic, rhythmic
-      int baseFreq = random(500, 1200);
-      newWord.tonePattern[i] = baseFreq + (i * 100); // Rising pattern
-      newWord.durationPattern[i] = random(100, 300);
-    } else {
-      // Neutral signal - moderate, variable
-      newWord.tonePattern[i] = random(800, 1800);
-      newWord.durationPattern[i] = random(100, 250);
-    }
-  }
-  
-  vocabulary[vocabularySize] = newWord;
-  vocabularySize++;
-  
-  Serial.println("🆕 Created new communication signal!");
-  Serial.print("  Context: ");
-  Serial.print(contextType);
-  Serial.print(" | Valence: ");
-  Serial.print(emotionalValence);
-  Serial.print(" | Pattern length: ");
-  Serial.println(newWord.patternLength);
-}
-
-// Emit a signal (play the pattern)
-void emitSignal(SignalWord* word) {
-  // Set the LEDs to the color associated with this signal using PWM
-  // NOTE: This assumes a COMMON ANODE RGB LED.
-  // For common anode, a lower PWM value means a brighter color.
-  // We subtract from 255 to invert the logic.
-  uint8_t r = 255 - word->r;
-  uint8_t g = 255 - word->g;
-  uint8_t b = 255 - word->b;
-
-  ledcWrite(PWM_CH_L_R, r);
-  ledcWrite(PWM_CH_L_G, g);
-  ledcWrite(PWM_CH_L_B, b);
-  ledcWrite(PWM_CH_R_R, r);
-  ledcWrite(PWM_CH_R_G, g);
-  ledcWrite(PWM_CH_R_B, b);
-
-  if (word == nullptr || !hasBuzzer) {
-    // If no buzzer, just log to serial (could be LED patterns, motor pulses, etc.)
-    Serial.print("📡 SIGNAL: ");
-    for (int i = 0; i < word->patternLength; i++) {
-      Serial.print(word->tonePattern[i]);
-      Serial.print("Hz/");
-      Serial.print(word->durationPattern[i]);
-      Serial.print("ms ");
-    }
-    Serial.println();
-    return;
-  }
-  
-  // If buzzer available, play the pattern
-  for (int i = 0; i < word->patternLength; i++) {
-    tone(BUZZER_PIN, word->tonePattern[i], word->durationPattern[i]);
-    delay(word->durationPattern[i]);
-    noTone(BUZZER_PIN);
-    delay(50); // Brief pause between tones
-  }
-  
-  word->timesUsed++;
-  currentState.lastCommunication = millis();
-}
-
-// Find best matching signal for current context
-SignalWord* findSignalForContext(int contextType, int emotionalValence) {
-  SignalWord* bestMatch = nullptr;
-  float bestScore = -1.0;
-  
-  for (int i = 0; i < vocabularySize; i++) {
-    // Score based on context match and emotional similarity
-    float contextMatch = (vocabulary[i].contextType == contextType) ? 1.0 : 0.3;
-    float emotionSimilarity = 1.0 - (abs(vocabulary[i].emotionalValence - emotionalValence) / 200.0);
-    float utilityBonus = vocabulary[i].utility * 0.5;
-    
-    float score = (contextMatch * 0.5) + (emotionSimilarity * 0.3) + utilityBonus;
-    
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatch = &vocabulary[i];
-    }
-  }
-  
-  // If no good match found (score < 0.5), create new signal
-  if (bestScore < 0.5 && vocabularySize < MAX_VOCABULARY) {
-    createNewSignal(contextType, emotionalValence);
-    return &vocabulary[vocabularySize - 1];
-  }
-  
-  return bestMatch;
-}
-
-// Update emotional state based on recent experiences
-void updateEmotionalState() {
-  // Frustration increases with trapped attempts and failures
-  currentState.frustrationLevel = min(100, trappedAttempts * 25 + 
-                                     (int)(currentGenome.failureCount * 2));
-  
-  // Confidence based on fitness and success rate
-  if (metrics.obstaclesEncountered > 0) {
-    float successRate = (float)metrics.obstaclesCleared / metrics.obstaclesEncountered;
-    currentState.confidenceLevel = (int)(successRate * 70 + currentGenome.fitnessScore * 30);
-  }
-  
-  // Curiosity decreases when frustrated, increases with exploration
-  currentState.curiosityLevel = 60 - (currentState.frustrationLevel / 2);
-  currentState.curiosityLevel = constrain(currentState.curiosityLevel, 20, 80);
-  
-  // Update state flags
-  currentState.isDistressed = (currentState.frustrationLevel > 70);
-  currentState.isTriumphant = (currentGenome.fitnessScore > 0.8 && 
-                              metrics.obstaclesCleared > 5);
-}
-
-// Communicate current state
-void expressState(int contextType, int emotionalValence) {
-  updateEmotionalState();
-  
-  Serial.print("🧠 State: Frustration=");
-  Serial.print(currentState.frustrationLevel);
-  Serial.print(" Confidence=");
-  Serial.print(currentState.confidenceLevel);
-  Serial.print(" Curiosity=");
-  Serial.println(currentState.curiosityLevel);
-  
-  SignalWord* signal = findSignalForContext(contextType, emotionalValence);
-  if (signal != nullptr) {
-    emitSignal(signal);
-  }
-}
-
-// Evolve vocabulary - reinforce useful signals, forget useless ones
-void evolveVocabulary() {
-  Serial.println("🧬 Evolving vocabulary...");
-  
-  for (int i = 0; i < vocabularySize; i++) {
-    // Calculate utility based on usage
-    if (vocabulary[i].timesUsed > 0) {
-      // Signals used frequently are more useful
-      float usageBonus = min(1.0, vocabulary[i].timesUsed / 10.0);
-      
-      // Signals matching current fitness are more useful
-      float fitnessAlignment = (currentGenome.fitnessScore > 0.5) ? 
-        ((vocabulary[i].emotionalValence > 0) ? 0.2 : -0.1) :
-        ((vocabulary[i].emotionalValence < 0) ? 0.2 : -0.1);
-      
-      vocabulary[i].utility = constrain(usageBonus + fitnessAlignment, 0.0, 1.0);
-    }
-  }
-  
-  // Occasionally mutate signals (slight changes to patterns)
-  if (random(0, 100) < 30 && vocabularySize > 0) {
-    int mutateIndex = random(0, vocabularySize);
-    int elementToMutate = random(0, vocabulary[mutateIndex].patternLength);
-    
-    vocabulary[mutateIndex].tonePattern[elementToMutate] += random(-200, 201);
-    vocabulary[mutateIndex].tonePattern[elementToMutate] = constrain(
-      vocabulary[mutateIndex].tonePattern[elementToMutate], 200, 4000
-    );
-    
-    Serial.print("🔀 Mutated signal #");
-    Serial.println(mutateIndex);
-  }
-  
-  saveVocabularyToEEPROM();
-}
-
-// Add this function to initialize default vocabulary if none exists
-void initializeDefaultVocabulary() {
-  if (vocabularySize == 0) {
-    Serial.println("🗣️ Creating default vocabulary...");
-    
-    // Create basic signals for common situations
-    createNewSignal(0, -40);  // Obstacle detected
-    createNewSignal(1, 60);   // Success
-    createNewSignal(2, -80);  // Trapped
-    createNewSignal(3, 30);   // Clear path
-    createNewSignal(4, 20);   // System/evolving
-    
-    saveVocabularyToEEPROM();
-  }
-}
+// All old vocabulary functions removed - using emergent signal system instead
 
 // ═══════════════════════════════════════════════════════════
 // 🧬 MUTATION FUNCTIONS - HOW THE ROBOT EVOLVES
@@ -650,7 +441,7 @@ void evolutionCycle() {
   Serial.println("═══════════════════════════════════════ 🌟\n");
   
   // Express excitement about evolving
-  expressState(4, 0); // Context: evolving, neutral valence
+  communicateCurrentState(); // Emergent signal based on environmental context
   
   // Calculate current fitness
   calculateFitness();
@@ -663,7 +454,8 @@ void evolutionCycle() {
       currentGenome.successCount++;
       
       // Express success!
-      expressState(1, 80); // Context: success, very positive
+      communicateCurrentState(); // Emergent success signal
+      updateSignalFeedback(true);
       
       // Small additional mutation to continue improving
       if (random(0, 100) < 30) { // 30% chance
@@ -678,17 +470,15 @@ void evolutionCycle() {
       currentGenome.generation++; // Still increment generation
       
       // Express disappointment
-      expressState(1, -40); // Context: success (expected), negative valence
+      communicateCurrentState(); // Emergent signal for expected success
     }
   } else {
     // First generation - always mutate
     mutateGenome();
   }
   
-  // Evolve vocabulary alongside behavior
-  if (vocabularySize > 0) {
-    evolveVocabulary();
-  }
+  // Evolve emergent signal system alongside behavior
+  signalGenerator.pruneUnusedSignals();
   
   // Save evolved genome to persistent memory
   saveGenomeToEEPROM();
@@ -706,8 +496,8 @@ void evolutionCycle() {
   Serial.println(currentGenome.turnSpeed);
   Serial.print("  Obstacle Threshold: ");
   Serial.println(currentGenome.obstacleThreshold);
-  Serial.print("  Vocabulary Size: ");
-  Serial.println(vocabularySize);
+  Serial.print("  Signal Pool Size: ");
+  Serial.println(signalGenerator.getVocabularySize());
   Serial.println("\n═══════════════════════════════════════\n");
 }
 
@@ -950,7 +740,8 @@ void aggressiveEscape() {
   metrics.timesTrapped++;
   
   // Express DISTRESS
-  expressState(2, -90); // Context: trapped, very negative
+  communicateCurrentState(); // Emergent distress signal for being trapped
+  updateSignalFeedback(false);
   
   unsigned long escapeStart = millis();
   
@@ -991,12 +782,13 @@ void aggressiveEscape() {
     trappedAttempts = 0;
     
     // Express RELIEF/SUCCESS
-    expressState(1, 70); // Context: success, positive
+    communicateCurrentState(); // Emergent signal for clearing obstacle
+    updateSignalFeedback(true);
   } else {
     Serial.println("⚠️ Still trapped, will retry");
     
     // Express continued distress
-    expressState(2, -80); // Context: trapped, negative
+    communicateCurrentState(); // Emergent signal for trapped state
   }
 }
 
@@ -1017,7 +809,7 @@ void handleObstacle() {
   Serial.println(initialDistance);
   
   // Express awareness of obstacle
-  expressState(0, -30); // Context: obstacle, slight negative
+  communicateCurrentState(); // Emergent signal for obstacle detection
   
   // // Blink the status LED to indicate thinking/avoiding
   // for(int i=0; i<3; i++) {
@@ -1039,7 +831,7 @@ void handleObstacle() {
     Serial.println("🎓 Applying learned strategy...");
     
     // Express confidence in using known strategy
-    expressState(1, 20); // Context: success expected, mildly positive
+    communicateCurrentState(); // Emergent signal for applying strategy
     
     backupTime = learnedMove->backupTime;
     turnTime = learnedMove->turnTime;
@@ -1071,13 +863,13 @@ void handleObstacle() {
       metrics.obstaclesCleared++;
       
       // Express success!
-      expressState(1, 60); // Context: success, positive
+      communicateCurrentState(); // Emergent signal for success
     } else {
       Serial.println("❌ Learned strategy failed");
       trappedAttempts++;
       
       // Express disappointment
-      expressState(0, -50); // Context: obstacle, negative
+      communicateCurrentState(); // Emergent signal for strategy failure
     }
     
     learnStrategy(initialDistance, direction, backupTime, turnTime, succeeded);
@@ -1087,7 +879,7 @@ void handleObstacle() {
     Serial.println("🔬 Exploring new approach...");
     
     // Express curiosity/uncertainty
-    expressState(3, 0); // Context: clear/exploring, neutral
+    communicateCurrentState(); // Emergent signal for exploration
     
     stopMotors();
     delay(200);
@@ -1154,7 +946,7 @@ void handleObstacle() {
     // Execute best maneuver
     if (clearPathFound) {
       // Express finding a path!
-      expressState(3, 50); // Context: clear, positive
+      communicateCurrentState(); // Emergent signal for finding path
       
       turnTime = currentGenome.turnDuration * 2;
       direction = bestDirection;
@@ -1177,12 +969,12 @@ void handleObstacle() {
         trappedAttempts = 0;
         
         // Express success!
-        expressState(1, 70); // Context: success, very positive
+        communicateCurrentState(); // Emergent signal for exploration success
       } else {
         trappedAttempts++;
         
         // Express confusion
-        expressState(0, -40); // Context: obstacle, negative
+        communicateCurrentState(); // Emergent signal for confusion
       }
       
       // Learn from this experience
@@ -1193,7 +985,7 @@ void handleObstacle() {
       trappedAttempts++;
       
       // Express frustration
-      expressState(2, -60); // Context: trapped, quite negative
+      communicateCurrentState(); // Emergent signal for frustration
       
       if (trappedAttempts >= MAX_TRAPPED_ATTEMPTS) {
         aggressiveEscape();
@@ -1213,6 +1005,265 @@ void handleObstacle() {
     evolutionCycle();
   }
 }
+
+// ═══════════════════════════════════════════════════════════
+// 📡 ESP-NOW SWARM COMMUNICATION SYSTEM
+// ═══════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════
+// 🌊 EMERGENT ESP-NOW CALLBACKS 
+// ═══════════════════════════════════════════════════════════
+
+// ESP-NOW message sent callback
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    Serial.printf("✅ Emergent signal sent successfully to %s\n", macToString((uint8_t*)mac_addr).c_str());
+  } else {
+    Serial.printf("❌ Emergent signal send failed to %s\n", macToString((uint8_t*)mac_addr).c_str());
+  }
+}
+
+// Initialize ESP-NOW communication
+void initializeSwarmCommunication() {
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+  
+  // Print MAC address
+  Serial.printf("📱 WHEELIE MAC: %s\n", WiFi.macAddress().c_str());
+  
+  // Initialize ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("❌ Error initializing ESP-NOW");
+    return;
+  }
+  
+  // Register emergent communication callbacks
+  esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onEmergentMessageReceived);
+  
+  // Set long range mode for better coverage
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+  
+  Serial.println("✅ ESP-NOW initialized for emergent communication");
+}
+
+// ═══════════════════════════════════════════════════════════
+// 🌊 EMERGENT COMMUNICATION SYSTEM 
+// ═══════════════════════════════════════════════════════════
+
+void communicateCurrentState() {
+  // Get current environmental context and emotional state
+  EnvironmentalContext context = getCurrentContext();
+  EmotionalState emotion = getCurrentEmotionalState();
+  
+  Serial.printf("🌊 Generating emergent signal for context: %s, emotion: %s\n", 
+                contextToString(context).c_str(), emotionToString(emotion).c_str());
+  
+  // Generate appropriate signal for current situation
+  SignalWord* signal = signalGenerator.generateSignalForContext(context, emotion);
+  
+  if (signal != nullptr) {
+    // Send emergent message via ESP-NOW
+    bool sent = signalGenerator.sendEmergentMessage(signal, context, emotion);
+    
+    if (sent) {
+      Serial.println("📡 Emergent signal broadcast successfully");
+      displaySignalOnLEDs(signal, context, emotion);
+    } else {
+      Serial.println("❌ Failed to broadcast emergent signal");
+    }
+  } else {
+    Serial.println("⚠️ No signal generated for current context");
+  }
+}
+
+void displaySignalOnLEDs(SignalWord* signal, EnvironmentalContext context, EmotionalState emotion) {
+  if (signal == nullptr) return;
+  
+  // Generate LED colors based on context and emotion
+  uint8_t r, g, b;
+  
+  // Base color influenced by context
+  switch (context) {
+    case CONTEXT_DANGER_SENSED:
+    case CONTEXT_OBSTACLE_NEAR:
+      r = 255; g = 0; b = 0; // Red for danger
+      break;
+    case CONTEXT_TASK_SUCCESS:
+    case CONTEXT_RESOURCE_FOUND:
+      r = 0; g = 255; b = 0; // Green for success
+      break;
+    case CONTEXT_PEER_DETECTED:
+    case CONTEXT_FOLLOWING:
+    case CONTEXT_LEADING:
+      r = 0; g = 0; b = 255; // Blue for social
+      break;
+    case CONTEXT_EXPLORATION:
+      r = 255; g = 255; b = 0; // Yellow for exploration
+      break;
+    case CONTEXT_OPEN_SPACE:
+      r = 0; g = 255; b = 255; // Cyan for open space
+      break;
+    default:
+      r = 128; g = 128; b = 128; // Gray for neutral
+      break;
+  }
+  
+  // Modify intensity based on emotion
+  float intensityMultiplier = 1.0f;
+  switch (emotion) {
+    case EMOTION_VERY_POSITIVE:
+      intensityMultiplier = 1.0f; // Full brightness
+      break;
+    case EMOTION_POSITIVE:
+      intensityMultiplier = 0.8f;
+      break;
+    case EMOTION_NEUTRAL:
+      intensityMultiplier = 0.6f;
+      break;
+    case EMOTION_NEGATIVE:
+      intensityMultiplier = 0.4f;
+      break;
+    case EMOTION_VERY_NEGATIVE:
+      intensityMultiplier = 0.2f; // Dim for negative emotions
+      break;
+  }
+  
+  r = (uint8_t)(r * intensityMultiplier);
+  g = (uint8_t)(g * intensityMultiplier);
+  b = (uint8_t)(b * intensityMultiplier);
+  
+  // Set LEDs (assuming common anode - invert values)
+  ledcWrite(PWM_CH_L_R, 255 - r);
+  ledcWrite(PWM_CH_L_G, 255 - g);
+  ledcWrite(PWM_CH_L_B, 255 - b);
+  ledcWrite(PWM_CH_R_R, 255 - r);
+  ledcWrite(PWM_CH_R_G, 255 - g);
+  ledcWrite(PWM_CH_R_B, 255 - b);
+  
+  // Keep LEDs on for signal duration (sum of all component durations)
+  uint16_t totalDuration = 0;
+  for (uint8_t i = 0; i < signal->componentCount; i++) {
+    totalDuration += signal->durations[i];
+  }
+  
+  delay(constrain(totalDuration, 0, 2000)); // Cap at 2 seconds max
+  
+  // Return to dim white/off
+  ledcWrite(PWM_CH_L_R, 240);
+  ledcWrite(PWM_CH_L_G, 240);
+  ledcWrite(PWM_CH_L_B, 240);
+  ledcWrite(PWM_CH_R_R, 240);
+  ledcWrite(PWM_CH_R_G, 240);
+  ledcWrite(PWM_CH_R_B, 240);
+}
+
+// Update signal utility based on outcome
+void updateSignalFeedback(bool wasSuccessful) {
+  if (wasSuccessful) {
+    recordSuccess();
+  } else {
+    recordFailure();
+  }
+}
+
+// ESP-NOW callback for receiving emergent messages
+void onEmergentMessageReceived(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  if (len == sizeof(EmergentMessage)) {
+    EmergentMessage* message = (EmergentMessage*)incomingData;
+    
+    Serial.printf("📨 Received emergent message from %s\n", macToString((uint8_t*)mac).c_str());
+    
+    // Update last peer contact time
+    lastPeerContact = millis();
+    
+    // Process the message through the signal generator
+    signalGenerator.processReceivedMessage(message);
+    
+    // Visual indication of receiving peer message
+    // Flash blue briefly to show peer communication
+    ledcWrite(PWM_CH_L_R, 255);
+    ledcWrite(PWM_CH_L_G, 255);
+    ledcWrite(PWM_CH_L_B, 100); // Blue flash
+    ledcWrite(PWM_CH_R_R, 255);
+    ledcWrite(PWM_CH_R_G, 255);
+    ledcWrite(PWM_CH_R_B, 100);
+    delay(200);
+    
+    // Return to normal
+    ledcWrite(PWM_CH_L_R, 240);
+    ledcWrite(PWM_CH_L_G, 240);
+    ledcWrite(PWM_CH_L_B, 240);
+    ledcWrite(PWM_CH_R_R, 240);
+    ledcWrite(PWM_CH_R_G, 240);
+    ledcWrite(PWM_CH_R_B, 240);
+  }
+}
+
+// Old message handling functions removed - using emergent communication
+
+// ═══════════════════════════════════════════════════════════
+// 🔧 UTILITY FUNCTIONS FOR ESP-NOW
+// ═══════════════════════════════════════════════════════════
+
+// Convert MAC address to string for display
+String macToString(const uint8_t* mac) {
+  char macStr[18];
+  sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", 
+          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(macStr);
+}
+
+// Check if two MAC addresses are equal
+bool macEquals(const uint8_t* mac1, const uint8_t* mac2) {
+  for (int i = 0; i < 6; i++) {
+    if (mac1[i] != mac2[i]) return false;
+  }
+  return true;
+}
+
+// Simple checksum calculation for message integrity
+uint8_t calculateChecksum(const uint8_t* data, size_t length) {
+  uint8_t checksum = 0;
+  for (size_t i = 0; i < length; i++) {
+    checksum ^= data[i];
+  }
+  return checksum;
+}
+
+// Find or create peer in swarm list
+int findOrCreatePeer(const uint8_t* mac) {
+  // First try to find existing peer
+  int existingIndex = findPeer(mac);
+  if (existingIndex >= 0) {
+    return existingIndex;
+  }
+  
+  // Find first inactive slot
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (!swarmPeers[i].isActive) {
+      memcpy(swarmPeers[i].macAddress, mac, 6);
+      swarmPeers[i].isActive = true;
+      swarmPeers[i].lastSeen = millis();
+      activePeerCount++;
+      return i;
+    }
+  }
+  
+  return -1; // No space for new peer
+}
+
+// Find existing peer by MAC address
+int findPeer(const uint8_t* mac) {
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (swarmPeers[i].isActive && macEquals(swarmPeers[i].macAddress, mac)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Old ESP-NOW sending functions removed - using emergent communication
 
 // ═══════════════════════════════════════════════════════════
 // 🎬 SETUP
@@ -1235,12 +1286,9 @@ void setup() {
   loadGenomeFromEEPROM();
   loadStrategiesFromEEPROM();
   loadMetricsFromEEPROM();
-  loadVocabularyFromEEPROM();
+  // Old vocabulary system removed - using emergent signals now
   
-  // Initialize default vocabulary if empty
-  if (vocabularySize == 0) {
-    initializeDefaultVocabulary();
-  }
+  // Emergent signal generator ready
   
   // Initialize buzzer if available
   if (BUZZER_PIN >= 0) {
@@ -1298,14 +1346,18 @@ void setup() {
   Serial.println(currentGenome.fitnessScore);
   Serial.print("  Strategies Learned: ");
   Serial.println(strategyCount);
-  Serial.print("  Vocabulary Size: ");
-  Serial.println(vocabularySize);
+  Serial.print("  Signal Vocabulary: ");
+  Serial.println(signalGenerator.getVocabularySize());
+  
+  // Initialize ESP-NOW swarm communication
+  Serial.println("\n📡 Initializing ESP-NOW swarm system...");
+  initializeSwarmCommunication();
   
   // Boot greeting
   Serial.println("\n🗣️ Initializing communication protocol...");
   // Express "awake and ready"
   delay(500);
-  expressState(4, 40); // Context: evolving/system, positive
+  communicateCurrentState(); // Emergent signal for evolution
   
   Serial.println("\n👁️ Waiting for motion to begin evolution...\n");
 }
@@ -1325,7 +1377,7 @@ void loop() {
       Serial.println("🧬 Resuming evolution...\n");
       
       // Express awakening/alertness
-      expressState(4, 20); // Context: system/evolving, mildly positive
+      communicateCurrentState(); // Emergent signal for mutation
       
       isAwake = true;
       lastActivityTime = millis();
@@ -1346,7 +1398,7 @@ void loop() {
         
         // Occasionally express contentment while cruising
         if (random(0, 1000) < 5) { // 0.5% chance per loop
-          expressState(3, 30); // Context: clear, mildly positive
+          communicateCurrentState(); // Emergent signal for clear path
         }
       }
     }
@@ -1365,4 +1417,6 @@ void loop() {
     stopMotors();
     delay(100);
   }
+  
+  // Emergent communication happens through sensors and context detection
 }

@@ -4,6 +4,8 @@
 
 This document provides a comprehensive technical overview of Project Jumbo's architecture, from individual bot design to swarm-level coordination.
 
+**🆕 Updated October 2025**: Now includes complete emergent communication system and audio beacon localization.
+
 ---
 
 ## 📋 Table of Contents
@@ -12,10 +14,12 @@ This document provides a comprehensive technical overview of Project Jumbo's arc
 2. [Hardware Architecture](#hardware-architecture)
 3. [Software Architecture](#software-architecture)
 4. [Communication Architecture](#communication-architecture)
-5. [Evolution Pipeline](#evolution-pipeline)
-6. [Memory Management](#memory-management)
-7. [Swarm Coordination](#swarm-coordination)
-8. [Design Decisions](#design-decisions)
+5. [Emergent Language System](#emergent-language-system)
+6. [Audio Beacon Localization](#audio-beacon-localization)
+7. [Evolution Pipeline](#evolution-pipeline)
+8. [Memory Management](#memory-management)
+9. [Swarm Coordination](#swarm-coordination)
+10. [Design Decisions](#design-decisions)
 
 ---
 
@@ -435,6 +439,161 @@ t+3ms   SPEEDY     Slows down, scans ahead           [Local]
 t+5ms   SPEEDY     Sends ACK to WHEELIE              ESP-NOW
 t+100ms WHEELIE    Uploads obstacle to MCU           WiFi
 ```txt
+
+---
+
+```
+
+---
+
+## Emergent Language System
+
+### Context-Driven Signal Generation
+
+**Philosophy:** Communication signals emerge from environmental context + emotional state, not predefined messages.
+
+```cpp
+// Traditional approach (static)
+void sendDangerSignal() {
+  buzzer.tone(1000, 500);  // Always 1kHz, 500ms
+  led.setColor(255, 0, 0); // Always red
+}
+
+// Emergent approach (dynamic)
+void expressState(int contextType, int emotionalValence) {
+  SignalWord* signal = findSignalForContext(contextType, emotionalValence);
+  if (signal == nullptr) {
+    signal = createNewSignal(contextType, emotionalValence);
+  }
+  emitSignal(signal); // Unique tone/color based on context+emotion
+}
+```
+
+### Signal Structure
+
+Each emergent signal contains:
+
+- **Acoustic Pattern**: Variable-length tone sequence (300-5000Hz)
+- **Visual Pattern**: RGB color progression with timing
+- **Context Metadata**: Environmental context that triggered signal
+- **Emotional Signature**: Frustration/confidence/curiosity levels
+- **Usage Statistics**: Success rate, times used, peer feedback
+
+### Context Detection Engine
+
+```cpp
+struct ContextDetector {
+  // Environmental analysis
+  bool isStuck();                    // Movement pattern analysis
+  float getMomentum();               // Speed/direction tracking
+  int getObstacleProximity();        // Sensor fusion
+  
+  // Success/failure tracking
+  void recordSuccess(int actionType);
+  void recordFailure(int actionType);
+  float getSuccessRate(int timeWindow);
+  
+  // Emotional state calculation
+  int calculateFrustration();        // Based on failures
+  int calculateConfidence();         // Based on successes  
+  int calculateCuriosity();          // Based on exploration
+};
+```
+
+### Signal Evolution Process
+
+1. **Creation**: New environmental context → Generate unique signal
+2. **Usage**: Signal used in communication → Track effectiveness
+3. **Feedback**: Peer response → Update success metrics
+4. **Pruning**: Unused signals → Remove from vocabulary
+5. **Mutation**: Successful signals → Small random variations
+
+---
+
+## Audio Beacon Localization
+
+### SPEEDIE Audio Beacon System
+
+**Philosophy:** One bot serves as spatial reference point for the entire swarm using audio time-of-flight.
+
+```cpp
+// SPEEDIE beacon transmission
+void sendAudioBeacon() {
+  // Send ESP-NOW sync message first
+  sendLocalizationRequest(BROADCAST_MAC);
+  
+  // Wait for propagation
+  delay(10);
+  
+  // Emit 2kHz audio beacon
+  ledcWriteTone(BUZZER_CHANNEL, BEACON_FREQUENCY);
+  delay(BEACON_DURATION);
+  ledcWriteTone(BUZZER_CHANNEL, 0);
+}
+```
+
+### Time-of-Flight Measurement
+
+```cpp
+// WHEELIE receiver (with future microphone)
+void handleLocalizationRequest(uint8_t* senderMac, LocalizationPayload* payload) {
+  uint32_t espNowReceiveTime = micros();
+  
+  // Wait for audio beacon
+  uint32_t audioReceiveTime = waitForAudioSignal(payload->beaconFrequency);
+  
+  // Calculate distance
+  uint32_t timeDifference = audioReceiveTime - espNowReceiveTime;
+  float distance = timeDifference * SOUND_SPEED_M_PER_US;
+  
+  // Update peer location
+  updatePeerLocation(senderMac, distance, calculateBearing());
+}
+```
+
+### ESP-NOW Protocol Extensions
+
+New message types added for localization:
+
+```cpp
+enum MessageType {
+  // Existing messages...
+  MSG_LOCALIZATION_REQUEST  = 0x50,  // Request distance measurement
+  MSG_LOCALIZATION_RESPONSE = 0x51,  // Response with timing data
+  MSG_BEACON_PING          = 0x52,  // Audio beacon synchronization
+  MSG_POSITION_SHARE       = 0x53,  // Share calculated position
+};
+
+struct LocalizationPayload {
+  uint8_t requestType;          // Request/Response/Ping
+  uint32_t beaconTimestamp;     // Microsecond timing
+  uint32_t responseTime;        // Response timestamp
+  float senderX, senderY;       // Position coordinates
+  float senderHeading;          // Orientation
+  uint16_t beaconFrequency;     // Audio frequency used
+  float measuredDistance;       // Calculated distance
+};
+```
+
+### Position Tracking
+
+```cpp
+struct Position {
+  float x = 0.0, y = 0.0;       // Cartesian coordinates
+  float heading = 0.0;          // Compass heading (degrees)
+  unsigned long lastUpdate;     // Timestamp
+  bool isValid = false;         // Position confidence
+};
+
+struct PeerLocation {
+  uint8_t peerMac[6];          // Peer identifier
+  Position position;           // Last known position
+  float distance = 0.0;        // Distance to this bot
+  float bearing = 0.0;         // Bearing to this bot
+  unsigned long lastSeen;      // Last communication time
+  bool isActive = false;       // Currently tracking
+};
+```
 
 ---
 

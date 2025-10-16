@@ -23,7 +23,19 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include "swarm_espnow.h"
+#include "swarm_ecosystem_manager.h"
 #include <EEPROM.h>
+
+// ═══════════════════════════════════════════════════════════
+// 🎯 LOCALIZATION CONSTANTS
+// ═══════════════════════════════════════════════════════════
+#define AUDIO_BEACON_FREQUENCY 2000   // 2 kHz audio beacon frequency
+#define LOCALIZATION_FREQUENCY 1500   // 1.5 kHz localization ping frequency
+#define SOUND_SPEED_M_PER_US 0.000343 // Speed of sound in air (meters per microsecond)
 
 // ═══════════════════════════════════════════════════════════
 // 💡 SPEEDIE LED CONFIGURATION (4 INDIVIDUAL 2-WIRE LEDs)
@@ -102,6 +114,11 @@ struct EvolvingGenome {
   unsigned long generation = 0;
 };
 
+// ═══════════════════════════════════════════════════════════
+// 🌐 ECOSYSTEM MANAGER (LAYER 3 INTELLIGENCE)
+// ═══════════════════════════════════════════════════════════
+SwarmEcosystemManager* ecosystemManager = nullptr;
+
 // 🗣️ EMERGENT LANGUAGE STRUCTURES (Same as WHEELIE)
 const int MAX_VOCABULARY = 50;
 const int BUZZER_PIN = -1; // No buzzer for SPEEDIE (speed focused)
@@ -150,6 +167,31 @@ struct LearnedStrategy {
 const int MAX_STRATEGIES = 25; // More strategies for SPEEDIE
 LearnedStrategy strategyLibrary[MAX_STRATEGIES];
 int strategyCount = 0;
+
+// ═══════════════════════════════════════════════════════════
+// 📡 ESP-NOW SWARM COMMUNICATION SYSTEM (SPEEDIE)
+// ═══════════════════════════════════════════════════════════
+SwarmPeer swarmPeers[MAX_SWARM_PEERS];
+int activePeerCount = 0;
+SwarmRole currentSwarmRole = ROLE_GUARDIAN; // SPEEDIE default role: fast response guardian
+BotType myBotType = BOT_SPEEDIE;
+uint8_t sequenceNumber = 0;
+CommStats commStats = {0};
+
+// Message queues and timers
+unsigned long lastDiscoveryTime = 0;
+unsigned long lastHeartbeatTime = 0;
+unsigned long lastStatusBroadcast = 0;
+
+// Swarm coordination state (SPEEDIE optimized for rapid response)
+bool isSwarmActive = false;
+bool hasLeader = false;
+uint8_t leaderMac[6] = {0};
+SwarmBehavior currentBehavior = BEHAVIOR_PATROL_FORMATION; // SPEEDIE patrols by default
+
+// Communication buffers
+SwarmMessage outgoingMessage;
+SwarmMessage incomingMessage;
 
 // ═══════════════════════════════════════════════════════════
 // 🌱 EVOLUTION STATE (SPEEDIE VERSION)
@@ -204,7 +246,42 @@ float currentHeading = 0.0;
 float targetHeading = 0.0;
 
 // ═══════════════════════════════════════════════════════════
-// 🗣️ EMERGENT LANGUAGE & PERSISTENCE FUNCTIONS (SPEEDIE VERSION)
+// � FUNCTION FORWARD DECLARATIONS
+// ═══════════════════════════════════════════════════════════
+// Motor control functions
+void setSpeedieColor(uint8_t red_intensity, uint8_t green_intensity);
+void stopMotors();
+void moveForward();
+void moveBackward();
+void turnLeft();
+void turnRight();
+
+// Swarm communication functions
+void handleSwarmMessage(const uint8_t* senderMac, SwarmMessage* message);
+void handleDiscoveryMessage(const uint8_t* senderMac, DiscoveryPayload* payload);
+void handlePairingRequest(const uint8_t* senderMac);
+void handleStatusUpdate(const uint8_t* senderMac, StatusPayload* payload);
+void handleSensorDataShare(const uint8_t* senderMac, SensorPayload* payload);
+void handleTaskAssignment(const uint8_t* senderMac, TaskPayload* payload);
+void handleEmergencyStop();
+void sendPairingResponse(const uint8_t* targetMac);
+int findPeer(const uint8_t* mac);
+int findOrCreatePeer(const uint8_t* mac);
+
+// Localization functions
+void sendLocalizationRequest(const uint8_t* targetMac);
+void sendLocalizationResponse(const uint8_t* targetMac, uint32_t originalTimestamp);
+void sendBeaconResponse(const uint8_t* targetMac, uint32_t beaconTimestamp);
+void handleLocalizationRequest(const uint8_t* senderMac, LocalizationPayload* payload);
+void handleLocalizationResponse(const uint8_t* senderMac, LocalizationPayload* payload);
+void handleBeaconPing(const uint8_t* senderMac, LocalizationPayload* payload);
+void handlePositionShare(const uint8_t* senderMac, LocalizationPayload* payload);
+
+// Utility functions (inline functions from swarm_espnow.h are available)
+// macToString, calculateChecksum, isValidMessage, macEquals are defined in header
+
+// ═══════════════════════════════════════════════════════════
+// �🗣️ EMERGENT LANGUAGE & PERSISTENCE FUNCTIONS (SPEEDIE VERSION)
 // ═══════════════════════════════════════════════════════════
 
 void saveGenomeToEEPROM() {
@@ -352,6 +429,307 @@ void createNewSignal(int contextType, int emotionalValence) {
 // - 2 GREEN LEDs: Left (pin 4) + Right (pin 14)
 // - Common Anode wiring: 0 = LED ON, 255 = LED OFF
 // - No buzzer for maximum speed performance
+
+// ═══════════════════════════════════════════════════════════
+// 📍 AUDIO BEACON LOCALIZATION SYSTEM (SPEEDIE AS BEACON)
+// ═══════════════════════════════════════════════════════════
+
+struct Position {
+  float x = 0.0;
+  float y = 0.0;
+  float heading = 0.0;
+  unsigned long lastUpdate = 0;
+  bool isValid = false;
+};
+
+struct PeerLocation {
+  uint8_t peerMac[6];
+  Position position;
+  float distance = 0.0;
+  float bearing = 0.0;
+  unsigned long lastSeen = 0;
+  bool isActive = false;
+};
+
+// Localization state
+Position myPosition;
+PeerLocation peerLocations[MAX_SWARM_PEERS];
+bool isLocalizationActive = false;
+
+// Audio beacon settings
+const int BEACON_FREQUENCY = 2000;    // 2kHz tone for beacon
+const int BEACON_DURATION = 200;      // 200ms beacon pulse
+const int BEACON_INTERVAL = 3000;     // Beacon every 3 seconds
+// Using #define LOCALIZATION_FREQUENCY from top of file
+const int PING_DURATION = 100;        // Shorter ping for ranging
+
+unsigned long lastBeaconTime = 0;
+unsigned long lastLocalizationPing = 0;
+bool isBeaconMode = true;  // SPEEDIE acts as beacon by default
+
+// ═══════════════════════════════════════════════════════════
+// 🔊 AUDIO BEACON FUNCTIONS
+// ═══════════════════════════════════════════════════════════
+
+void enableBuzzer() {
+  if (BUZZER_PIN >= 0) {
+    pinMode(BUZZER_PIN, OUTPUT);
+    hasBuzzer = true;
+    Serial.println("⚡ SPEEDIE buzzer enabled for localization");
+  }
+}
+
+// Send audio beacon for other bots to locate SPEEDIE
+void sendAudioBeacon() {
+  if (!hasBuzzer || BUZZER_PIN < 0) return;
+  
+  Serial.println("📍 SPEEDIE sending location beacon...");
+  
+  // Send identification pattern: 3 short pulses at beacon frequency
+  for (int i = 0; i < 3; i++) {
+    tone(BUZZER_PIN, BEACON_FREQUENCY, 50);
+    delay(60);
+    noTone(BUZZER_PIN);
+    delay(40);
+  }
+  
+  // Send longer beacon pulse for distance measurement
+  tone(BUZZER_PIN, BEACON_FREQUENCY, BEACON_DURATION);
+  delay(BEACON_DURATION);
+  noTone(BUZZER_PIN);
+  
+  // Flash green LED during beacon
+  setSpeedieColor(0, 255); // Green
+  delay(100);
+  setSpeedieColor(0, 0);   // Off
+}
+
+// Send localization ping to specific peer
+void sendLocalizationPing(uint8_t* targetMac) {
+  if (!hasBuzzer || BUZZER_PIN < 0) return;
+  
+  Serial.printf("📍 Sending ping to %s\n", macToString(targetMac).c_str());
+  
+  // Send ping notification via ESP-NOW first
+  sendLocalizationRequest(targetMac);
+  
+  // Small delay then send audio ping
+  delay(50);
+  
+  // Send distinct localization ping
+  tone(BUZZER_PIN, LOCALIZATION_FREQUENCY, PING_DURATION);
+  delay(PING_DURATION);
+  noTone(BUZZER_PIN);
+  
+  // Flash blue-ish (both LEDs) during ping
+  setSpeedieColor(128, 128);
+  delay(50);
+  setSpeedieColor(0, 0);
+}
+
+// Update peer location based on distance measurement
+void updatePeerLocation(uint8_t* peerMac, float distance, float bearing) {
+  int peerIndex = findPeer(peerMac);
+  if (peerIndex < 0) return;
+  
+  // Calculate peer position relative to SPEEDIE
+  float peerX = myPosition.x + (distance * cos(radians(bearing)));
+  float peerY = myPosition.y + (distance * sin(radians(bearing)));
+  
+  // Update peer location
+  PeerLocation* peer = &peerLocations[peerIndex];
+  memcpy(peer->peerMac, peerMac, 6);
+  peer->position.x = peerX;
+  peer->position.y = peerY;
+  peer->position.lastUpdate = millis();
+  peer->position.isValid = true;
+  peer->distance = distance;
+  peer->bearing = bearing;
+  peer->lastSeen = millis();
+  peer->isActive = true;
+  
+  Serial.printf("📍 Updated %s location: (%.1f, %.1f) dist:%.1fcm\n", 
+                macToString(peerMac).c_str(), peerX, peerY, distance);
+}
+
+// Get distance to peer based on last known location
+float getDistanceToPeer(uint8_t* peerMac) {
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (peerLocations[i].isActive && macEquals(peerLocations[i].peerMac, peerMac)) {
+      return peerLocations[i].distance;
+    }
+  }
+  return -1.0; // Unknown distance
+}
+
+// Get bearing to peer based on last known location
+float getBearingToPeer(uint8_t* peerMac) {
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (peerLocations[i].isActive && macEquals(peerLocations[i].peerMac, peerMac)) {
+      return peerLocations[i].bearing;
+    }
+  }
+  return -1.0; // Unknown bearing
+}
+
+// ═══════════════════════════════════════════════════════════
+// 📡 LOCALIZATION ESP-NOW MESSAGES
+// ═══════════════════════════════════════════════════════════
+
+void sendLocalizationRequest(uint8_t* targetMac) {
+  memset(&outgoingMessage, 0, sizeof(SwarmMessage));
+  
+  outgoingMessage.header.messageType = MSG_LOCALIZATION_REQUEST;
+  outgoingMessage.header.priority = PRIORITY_NORMAL;
+  outgoingMessage.header.senderType = myBotType;
+  outgoingMessage.header.sequenceNumber = sequenceNumber++;
+  outgoingMessage.header.timestamp = millis();
+  
+  // Include our current position in the request
+  outgoingMessage.payload.localization.senderX = myPosition.x;
+  outgoingMessage.payload.localization.senderY = myPosition.y;
+  outgoingMessage.payload.localization.senderHeading = myPosition.heading;
+  outgoingMessage.payload.localization.requestType = 1; // Audio ping request
+  outgoingMessage.payload.localization.beaconFrequency = LOCALIZATION_FREQUENCY;
+  
+  outgoingMessage.header.checksum = calculateChecksum((uint8_t*)&outgoingMessage, sizeof(SwarmMessage) - 1);
+  
+  esp_now_send(targetMac, (uint8_t*)&outgoingMessage, sizeof(SwarmMessage));
+}
+
+// Old sendLocalizationResponse removed - using new version with timestamp parameter below
+
+// ═══════════════════════════════════════════════════════════
+// 🧭 POSITION TRACKING & NAVIGATION
+// ═══════════════════════════════════════════════════════════
+
+void initializeLocalization() {
+  // Initialize SPEEDIE position (assume starting at origin)
+  myPosition.x = 0.0;
+  myPosition.y = 0.0;
+  myPosition.heading = 0.0;
+  myPosition.lastUpdate = millis();
+  myPosition.isValid = true;
+  
+  // Clear peer locations
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    peerLocations[i].isActive = false;
+  }
+  
+  enableBuzzer();
+  isLocalizationActive = true;
+  
+  Serial.println("📍 SPEEDIE localization system initialized");
+  Serial.printf("📍 SPEEDIE position: (%.1f, %.1f) heading: %.1f°\n", 
+                myPosition.x, myPosition.y, myPosition.heading);
+}
+
+void updateMyPosition() {
+  // Simple dead reckoning based on movement
+  // This is rough estimation - could be improved with wheel encoders
+  
+  unsigned long now = millis();
+  float deltaTime = (now - myPosition.lastUpdate) / 1000.0; // Convert to seconds
+  
+  if (deltaTime > 0.1) { // Update every 100ms
+    // Estimate movement based on current motor commands
+    // This is very simplified - actual implementation would need encoder feedback
+    
+    myPosition.heading = currentHeading; // Use IMU heading
+    myPosition.lastUpdate = now;
+    
+    // Dead reckoning would go here - for now just update timestamp
+    // In a real implementation, you'd track wheel rotations and calculate displacement
+  }
+}
+
+// Navigate towards a peer using their known location
+bool navigateToPeer(uint8_t* peerMac) {
+  float distance = getDistanceToPeer(peerMac);
+  float bearing = getBearingToPeer(peerMac);
+  
+  if (distance < 0 || bearing < 0) {
+    Serial.printf("📍 No location data for %s - sending ping\n", macToString(peerMac).c_str());
+    sendLocalizationPing(peerMac);
+    return false;
+  }
+  
+  Serial.printf("📍 Navigating to %s: %.1fcm at %.1f°\n", 
+                macToString(peerMac).c_str(), distance, bearing);
+  
+  // Calculate turn needed
+  float headingError = bearing - myPosition.heading;
+  while (headingError > 180) headingError -= 360;
+  while (headingError < -180) headingError += 360;
+  
+  // Turn towards peer if needed
+  if (abs(headingError) > 15) { // 15 degree tolerance
+    if (headingError > 0) {
+      turnRight();
+      delay(100);
+    } else {
+      turnLeft();
+      delay(100);
+    }
+    stopMotors();
+    return false; // Still turning
+  }
+  
+  // Move towards peer if reasonably aligned
+  if (distance > 50) { // Stop at 50cm distance
+    moveForward();
+    delay(200);
+    stopMotors();
+  }
+  
+  return (distance <= 50); // Return true if we've reached the peer
+}
+
+// Update localization system
+void updateLocalization() {
+  if (!isLocalizationActive) return;
+  
+  updateMyPosition();
+  
+  unsigned long now = millis();
+  
+  // Send beacon periodically if in beacon mode
+  if (isBeaconMode && (now - lastBeaconTime > BEACON_INTERVAL)) {
+    sendAudioBeacon();
+    lastBeaconTime = now;
+  }
+  
+  // Send localization ping to peers periodically
+  if (now - lastLocalizationPing > 5000) { // Every 5 seconds
+    for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+      if (swarmPeers[i].isActive) {
+        sendLocalizationPing(swarmPeers[i].macAddress);
+        delay(100); // Stagger pings
+      }
+    }
+    lastLocalizationPing = now;
+  }
+  
+  // Age out old peer locations
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (peerLocations[i].isActive && (now - peerLocations[i].lastSeen > 10000)) {
+      peerLocations[i].isActive = false;
+      Serial.printf("📍 Aged out location for peer %d\n", i);
+    }
+  }
+}
+
+void setSpeedieColor(uint8_t red_intensity, uint8_t green_intensity) {
+  // Set all 4 LEDs (Common Anode: 0=ON, 255=OFF)
+  uint8_t red_value = (red_intensity > 0) ? 0 : 255;
+  uint8_t green_value = (green_intensity > 0) ? 0 : 255;
+  
+  ledcWrite(PWM_CH_L_R, red_value);    // Left RED LED
+  ledcWrite(PWM_CH_L_G, green_value);  // Left GREEN LED  
+  ledcWrite(PWM_CH_R_R, red_value);    // Right RED LED
+  ledcWrite(PWM_CH_R_G, green_value);  // Right GREEN LED
+}
+
 void emitSignal(SignalWord* word) {
   if (word == nullptr) return;
   
@@ -1286,7 +1664,339 @@ void handleObstacle() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// 🎬 SPEEDIE SETUP
+// 📡 ESP-NOW SWARM COMMUNICATION SYSTEM (SPEEDIE)
+// ═══════════════════════════════════════════════════════════
+
+// ESP-NOW message received callback (SPEEDIE optimized)
+void onDataReceived(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  if (len != sizeof(SwarmMessage)) {
+    Serial.println("⚠️ Invalid message size");
+    commStats.commErrors++;
+    return;
+  }
+  
+  memcpy(&incomingMessage, incomingData, sizeof(SwarmMessage));
+  
+  if (!isValidMessage(&incomingMessage)) {
+    Serial.println("⚠️ Invalid message");
+    commStats.commErrors++;
+    return;
+  }
+  
+  commStats.messagesReceived++;
+  commStats.lastMessageTime = millis();
+  
+  String macStr = macToString(mac);
+  Serial.printf("📨 Msg from %s: Type=0x%02X\n", 
+                macStr.c_str(), incomingMessage.header.messageType);
+  
+  // SPEEDIE processes messages quickly
+  handleSwarmMessage(mac, &incomingMessage);
+}
+
+// ESP-NOW message sent callback
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    commStats.messagesSent++;
+  } else {
+    commStats.messagesDropped++;
+  }
+}
+
+// Initialize ESP-NOW communication (SPEEDIE version)
+void initializeSwarmCommunication() {
+  WiFi.mode(WIFI_STA);
+  Serial.printf("📱 SPEEDIE MAC: %s\n", WiFi.macAddress().c_str());
+  
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("❌ ESP-NOW init failed");
+    return;
+  }
+  
+  esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataReceived);
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
+  
+  Serial.println("✅ ESP-NOW (SPEEDIE mode) ready");
+  
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    swarmPeers[i].isActive = false;
+  }
+  
+  isSwarmActive = true;
+  lastDiscoveryTime = millis() - DISCOVERY_INTERVAL;
+}
+
+// Handle incoming swarm messages (SPEEDIE optimized)
+void handleSwarmMessage(const uint8_t* senderMac, SwarmMessage* message) {
+  MessageType msgType = (MessageType)message->header.messageType;
+  
+  switch (msgType) {
+    case MSG_DISCOVERY:
+      handleDiscoveryMessage(senderMac, &message->payload.discovery);
+      break;
+    case MSG_PAIRING_REQUEST:
+      handlePairingRequest(senderMac);
+      break;
+    case MSG_STATUS_UPDATE:
+      handleStatusUpdate(senderMac, &message->payload.status);
+      break;
+    case MSG_SENSOR_DATA:
+      handleSensorDataShare(senderMac, &message->payload.sensor);
+      break;
+    case MSG_TASK_ASSIGNMENT:
+      handleTaskAssignment(senderMac, &message->payload.task);
+      break;
+    case MSG_EMERGENCY_STOP:
+      handleEmergencyStop();
+      break;
+    case MSG_LOCALIZATION_REQUEST:
+      handleLocalizationRequest(senderMac, &message->payload.localization);
+      break;
+    case MSG_LOCALIZATION_RESPONSE:
+      handleLocalizationResponse(senderMac, &message->payload.localization);
+      break;
+    case MSG_BEACON_PING:
+      handleBeaconPing(senderMac, &message->payload.localization);
+      break;
+    case MSG_POSITION_SHARE:
+      handlePositionShare(senderMac, &message->payload.localization);
+      break;
+    default:
+      break; // SPEEDIE ignores unknown messages for speed
+  }
+}
+
+// Handle discovery (SPEEDIE responds quickly)
+void handleDiscoveryMessage(const uint8_t* senderMac, DiscoveryPayload* payload) {
+  Serial.printf("🔍 Discovery: %s (Gen:%d, Fit:%.3f)\n", 
+                (payload->botType == BOT_WHEELIE) ? "WHEELIE" : "UNKNOWN",
+                payload->generation, payload->fitnessScore);
+  
+  int peerIndex = findOrCreatePeer(senderMac);
+  if (peerIndex >= 0) {
+    SwarmPeer* peer = &swarmPeers[peerIndex];
+    peer->botType = (BotType)payload->botType;
+    peer->currentRole = (SwarmRole)payload->currentRole;
+    peer->generation = payload->generation;
+    peer->fitnessScore = payload->fitnessScore;
+    peer->lastSeen = millis();
+    peer->isActive = true;
+    
+    sendPairingResponse(senderMac);
+  }
+}
+
+// Handle pairing requests (SPEEDIE fast response)
+void handlePairingRequest(const uint8_t* senderMac) {
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, senderMac, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  
+  if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+    sendPairingResponse(senderMac);
+  }
+}
+
+// Handle status updates (SPEEDIE monitors peer performance)
+void handleStatusUpdate(const uint8_t* senderMac, StatusPayload* payload) {
+  int peerIndex = findPeer(senderMac);
+  if (peerIndex >= 0) {
+    SwarmPeer* peer = &swarmPeers[peerIndex];
+    peer->currentRole = (SwarmRole)payload->currentRole;
+    peer->generation = payload->generation;
+    peer->fitnessScore = payload->fitnessScore;
+    peer->lastSeen = millis();
+  }
+}
+
+// Handle sensor data (SPEEDIE uses for rapid threat assessment)
+void handleSensorDataShare(const uint8_t* senderMac, SensorPayload* payload) {
+  // SPEEDIE can use WHEELIE's precise distance data for better navigation
+  if (payload->sensorType == 1) { // VL53L0X data
+    float trustMultiplier = 1.0f;
+    bool isTrusted = verifyDataWithEcosystem((uint8_t*)senderMac, 
+                                           payload->value1 * 100, // Simple hash
+                                           &trustMultiplier);
+    
+    if (isTrusted && trustMultiplier > 0.5f) {
+      Serial.printf("🔬 WHEELIE distance: %.2fcm (trust: %.3f)\n", 
+                    payload->value1, trustMultiplier);
+      
+      // Report successful interaction to ecosystem
+      reportInteractionToEcosystem((uint8_t*)senderMac, INTERACTION_DATA_SHARE, RESULT_SUCCESS);
+    } else {
+      Serial.printf("⚠️ Low trust sensor data from WHEELIE (trust: %.3f)\n", trustMultiplier);
+      
+      // Report failed interaction to ecosystem
+      reportInteractionToEcosystem((uint8_t*)senderMac, INTERACTION_DATA_SHARE, RESULT_FAILURE);
+    }
+  }
+}
+
+// Handle task assignments (SPEEDIE for urgent tasks)
+void handleTaskAssignment(const uint8_t* senderMac, TaskPayload* payload) {
+  Serial.printf("📋 Task: Type=%d, Priority=%d\n", payload->taskType, payload->taskPriority);
+  
+  // SPEEDIE prioritizes high-priority tasks
+  if (payload->taskPriority >= 7) {
+    Serial.println("⚡ High priority task - SPEEDIE accepting");
+    // Could implement rapid task execution here
+  }
+}
+
+// Handle emergency stop (SPEEDIE immediate response)
+void handleEmergencyStop() {
+  Serial.println("🛑 EMERGENCY STOP!");
+  stopMotors();
+  isAwake = false;
+  // Flash red LEDs rapidly for emergency
+  for (int i = 0; i < 10; i++) {
+    setSpeedieColor(255, 0); // Red
+    delay(100);
+    setSpeedieColor(0, 0);   // Off
+    delay(100);
+  }
+}
+
+// Utility functions (optimized for SPEEDIE)
+int findOrCreatePeer(const uint8_t* mac) {
+  int existingIndex = findPeer(mac);
+  if (existingIndex >= 0) return existingIndex;
+  
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (!swarmPeers[i].isActive) {
+      memcpy(swarmPeers[i].macAddress, mac, 6);
+      swarmPeers[i].isActive = true;
+      activePeerCount++;
+      return i;
+    }
+  }
+  return -1;
+}
+
+int findPeer(const uint8_t* mac) {
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (swarmPeers[i].isActive && macEquals(swarmPeers[i].macAddress, mac)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Send discovery (SPEEDIE announces guardian capabilities)
+void sendDiscoveryMessage() {
+  memset(&outgoingMessage, 0, sizeof(SwarmMessage));
+  
+  outgoingMessage.header.messageType = MSG_DISCOVERY;
+  outgoingMessage.header.priority = PRIORITY_NORMAL; // SPEEDIE higher priority
+  outgoingMessage.header.senderType = myBotType;
+  outgoingMessage.header.sequenceNumber = sequenceNumber++;
+  outgoingMessage.header.timestamp = millis();
+  
+  outgoingMessage.payload.discovery.botType = myBotType;
+  outgoingMessage.payload.discovery.currentRole = currentSwarmRole;
+  outgoingMessage.payload.discovery.generation = currentGenome.generation;
+  outgoingMessage.payload.discovery.fitnessScore = currentGenome.fitnessScore;
+  outgoingMessage.payload.discovery.uptime = millis();
+  
+  outgoingMessage.header.checksum = calculateChecksum((uint8_t*)&outgoingMessage, sizeof(SwarmMessage) - 1);
+  
+  uint8_t broadcastAddress[] = BROADCAST_MAC;
+  esp_err_t result = esp_now_send(broadcastAddress, (uint8_t*)&outgoingMessage, sizeof(SwarmMessage));
+  
+  if (result == ESP_OK) {
+    commStats.discoveryCount++;
+  } else {
+    commStats.commErrors++;
+  }
+}
+
+// Send pairing response (SPEEDIE quick response)
+void sendPairingResponse(const uint8_t* targetMac) {
+  memset(&outgoingMessage, 0, sizeof(SwarmMessage));
+  
+  outgoingMessage.header.messageType = MSG_PAIRING_RESPONSE;
+  outgoingMessage.header.priority = PRIORITY_NORMAL;
+  outgoingMessage.header.senderType = myBotType;
+  outgoingMessage.header.sequenceNumber = sequenceNumber++;
+  outgoingMessage.header.timestamp = millis();
+  
+  outgoingMessage.payload.status.currentRole = currentSwarmRole;
+  outgoingMessage.payload.status.generation = currentGenome.generation;
+  outgoingMessage.payload.status.fitnessScore = currentGenome.fitnessScore;
+  outgoingMessage.payload.status.emotionalState[0] = currentState.frustrationLevel;
+  outgoingMessage.payload.status.emotionalState[1] = currentState.confidenceLevel;
+  outgoingMessage.payload.status.emotionalState[2] = currentState.curiosityLevel;
+  
+  outgoingMessage.header.checksum = calculateChecksum((uint8_t*)&outgoingMessage, sizeof(SwarmMessage) - 1);
+  
+  esp_now_send(targetMac, (uint8_t*)&outgoingMessage, sizeof(SwarmMessage));
+}
+
+// Broadcast status (SPEEDIE efficient updates)
+void broadcastStatusUpdate() {
+  if (activePeerCount == 0) return;
+  
+  memset(&outgoingMessage, 0, sizeof(SwarmMessage));
+  
+  outgoingMessage.header.messageType = MSG_STATUS_UPDATE;
+  outgoingMessage.header.priority = PRIORITY_LOW;
+  outgoingMessage.header.senderType = myBotType;
+  outgoingMessage.header.sequenceNumber = sequenceNumber++;
+  outgoingMessage.header.timestamp = millis();
+  
+  outgoingMessage.payload.status.currentRole = currentSwarmRole;
+  outgoingMessage.payload.status.generation = currentGenome.generation;
+  outgoingMessage.payload.status.fitnessScore = currentGenome.fitnessScore;
+  outgoingMessage.payload.status.emotionalState[0] = currentState.frustrationLevel;
+  outgoingMessage.payload.status.emotionalState[1] = currentState.confidenceLevel;
+  outgoingMessage.payload.status.emotionalState[2] = currentState.curiosityLevel;
+  
+  outgoingMessage.header.checksum = calculateChecksum((uint8_t*)&outgoingMessage, sizeof(SwarmMessage) - 1);
+  
+  uint8_t broadcastAddress[] = BROADCAST_MAC;
+  esp_now_send(broadcastAddress, (uint8_t*)&outgoingMessage, sizeof(SwarmMessage));
+}
+
+// Update swarm communication (SPEEDIE optimized)
+void updateSwarmCommunication() {
+  if (!isSwarmActive) return;
+  
+  unsigned long currentTime = millis();
+  
+  // SPEEDIE sends faster updates for rapid coordination
+  if (currentTime - lastDiscoveryTime > DISCOVERY_INTERVAL) {
+    sendDiscoveryMessage();
+    lastDiscoveryTime = currentTime;
+  }
+  
+  if (currentTime - lastStatusBroadcast > 7000) { // Every 7 seconds (faster than WHEELIE)
+    broadcastStatusUpdate();
+    lastStatusBroadcast = currentTime;
+  }
+  
+  // Clean up peers quickly
+  for (int i = 0; i < MAX_SWARM_PEERS; i++) {
+    if (swarmPeers[i].isActive && 
+        (currentTime - swarmPeers[i].lastSeen > PEER_TIMEOUT)) {
+      swarmPeers[i].isActive = false;
+      activePeerCount--;
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// � ECOSYSTEM FUNCTION DECLARATIONS
+// ═══════════════════════════════════════════════════════════
+
+void initializeEcosystemManager();
+bool verifyDataWithEcosystem(uint8_t* senderMac, uint32_t dataHash, float* trustMultiplier);
+void reportInteractionToEcosystem(uint8_t* botMac, InteractionType type, InteractionResult result);
+
+// ═══════════════════════════════════════════════════════════
+// �🎬 SPEEDIE SETUP
 // ═══════════════════════════════════════════════════════════
 
 void setup() {
@@ -1367,11 +2077,58 @@ void setup() {
   Serial.print("  Fastest Obstacle Time: ");
   Serial.println(metrics.fastestObstacleTime);
   
+  // Initialize ESP-NOW swarm communication (SPEEDIE)
+  Serial.println("\n📡 Initializing SPEEDIE ESP-NOW swarm system...");
+  initializeSwarmCommunication();
+  
+  // Initialize Swarm Ecosystem Manager (Layer 3 Intelligence)
+  Serial.println("\n🌐 Initializing Swarm Ecosystem Manager...");
+  initializeEcosystemManager();
+  
   Serial.println("\n⚡ Initializing SPEEDIE communication protocol...");
   delay(300);
   expressState(4, 50);
   
   Serial.println("\n⚡ SPEEDIE ready for immediate high-speed evolution!\n");
+}
+
+// ═══════════════════════════════════════════════════════════
+// 🌐 ECOSYSTEM TRUST VERIFICATION (LAYER 3 INTELLIGENCE)
+// ═══════════════════════════════════════════════════════════
+
+// Initialize ecosystem manager
+void initializeEcosystemManager() {
+  ecosystemManager = new SwarmEcosystemManager();
+  Serial.println("🌟 Ecosystem Manager initialized - Layer 3 Intelligence active");
+}
+
+// Trust verification functions for data quality assessment
+bool verifyDataWithEcosystem(uint8_t* senderMac, uint32_t dataHash, float* trustMultiplier) {
+  if (!ecosystemManager) {
+    *trustMultiplier = 1.0f;
+    return true;
+  }
+  
+  BotProfile* profile = ecosystemManager->getBotProfile(senderMac);
+  if (profile) {
+    // Use correct field names from BotProfile struct
+    *trustMultiplier = (profile->reputationScore / 100.0f) * profile->dataAccuracy;
+    return *trustMultiplier > 0.3f; // Threshold for data acceptance
+  }
+  
+  *trustMultiplier = 0.5f; // Default for unknown bots
+  return true;
+}
+
+void reportInteractionToEcosystem(uint8_t* botMac, InteractionType type, InteractionResult result) {
+  if (ecosystemManager) {
+    // Get our own MAC address for the interaction
+    uint8_t myMac[6];
+    WiFi.macAddress(myMac);
+    
+    // Record interaction between us and the other bot
+    ecosystemManager->recordInteraction(myMac, botMac, type, result);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1413,7 +2170,6 @@ void loop() {
     evolutionCycle();
     
   } else if (!isAwake) {
-    stopMotorsCoast();
     // Turn off all LEDs (255 = OFF for common anode)
     ledcWrite(PWM_CH_L_R, 255); ledcWrite(PWM_CH_L_G, 255);
     ledcWrite(PWM_CH_R_R, 255); ledcWrite(PWM_CH_R_G, 255);
@@ -1422,4 +2178,114 @@ void loop() {
     stopMotors();
     delay(50);
   }
+  
+  // Update swarm communication (SPEEDIE fast updates)
+  updateSwarmCommunication();
+  
+  // Update ecosystem manager (Layer 3 intelligence)
+  if (ecosystemManager != nullptr) {
+    ecosystemManager->update();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 🎯 LOCALIZATION MESSAGE HANDLERS
+// ═══════════════════════════════════════════════════════════
+
+// Handle localization request from peer
+void handleLocalizationRequest(const uint8_t* senderMac, LocalizationPayload* payload) {
+  Serial.printf("📍 Localization request from %s\n", macToString(senderMac).c_str());
+  
+  // Send audio beacon immediately
+  sendAudioBeacon();
+  
+  // Send response with our position
+  sendLocalizationResponse((uint8_t*)senderMac, micros());
+}
+
+// Handle localization response from peer
+void handleLocalizationResponse(const uint8_t* senderMac, LocalizationPayload* payload) {
+  Serial.printf("📍 Localization response from %s\n", macToString(senderMac).c_str());
+  
+  // Calculate distance based on time-of-flight
+  uint32_t currentTime = micros();
+  uint32_t roundTripTime = currentTime - payload->beaconTimestamp;
+  float distance = (roundTripTime * SOUND_SPEED_M_PER_US) / 2.0; // Divide by 2 for round trip
+  
+  // Calculate bearing to peer
+  float dx = payload->senderX - myPosition.x;
+  float dy = payload->senderY - myPosition.y;
+  float bearing = atan2(dy, dx) * 180.0 / PI; // Convert to degrees
+  
+  // Update peer location
+  updatePeerLocation((uint8_t*)senderMac, distance, bearing);
+  
+  Serial.printf("📏 Distance to peer: %.3f meters\n", distance);
+}
+
+// Handle beacon ping for ranging
+void handleBeaconPing(const uint8_t* senderMac, LocalizationPayload* payload) {
+  Serial.printf("🔊 Beacon ping from %s\n", macToString(senderMac).c_str());
+  
+  // Respond with timestamp for ToF calculation
+  sendBeaconResponse(senderMac, payload->beaconTimestamp);
+}
+
+// Handle position sharing
+void handlePositionShare(const uint8_t* senderMac, LocalizationPayload* payload) {
+  Serial.printf("📌 Position update from %s: (%.2f, %.2f)\n", 
+                macToString(senderMac).c_str(), payload->senderX, payload->senderY);
+  
+  // Calculate bearing to peer
+  float dx = payload->senderX - myPosition.x;
+  float dy = payload->senderY - myPosition.y;
+  float bearing = atan2(dy, dx) * 180.0 / PI; // Convert to degrees
+  
+  // Update peer position in our tracking
+  updatePeerLocation((uint8_t*)senderMac, payload->measuredDistance, bearing);
+}
+
+// Send localization response
+void sendLocalizationResponse(const uint8_t* targetMac, uint32_t originalTimestamp) {
+  memset(&outgoingMessage, 0, sizeof(SwarmMessage));
+  
+  outgoingMessage.header.messageType = MSG_LOCALIZATION_RESPONSE;
+  outgoingMessage.header.priority = PRIORITY_HIGH; // Time-sensitive
+  outgoingMessage.header.senderType = myBotType;
+  outgoingMessage.header.sequenceNumber = sequenceNumber++;
+  outgoingMessage.header.timestamp = millis();
+  
+  outgoingMessage.payload.localization.requestType = 1; // Response
+  outgoingMessage.payload.localization.beaconTimestamp = originalTimestamp;
+  outgoingMessage.payload.localization.responseTime = micros();
+  outgoingMessage.payload.localization.senderX = myPosition.x;
+  outgoingMessage.payload.localization.senderY = myPosition.y;
+  outgoingMessage.payload.localization.senderHeading = myPosition.heading;
+  outgoingMessage.payload.localization.beaconFrequency = AUDIO_BEACON_FREQUENCY;
+  
+  outgoingMessage.header.checksum = calculateChecksum((uint8_t*)&outgoingMessage, sizeof(SwarmMessage) - 1);
+  
+  esp_now_send(targetMac, (uint8_t*)&outgoingMessage, sizeof(SwarmMessage));
+}
+
+// Send beacon response for ToF measurement
+void sendBeaconResponse(const uint8_t* targetMac, uint32_t beaconTimestamp) {
+  memset(&outgoingMessage, 0, sizeof(SwarmMessage));
+  
+  outgoingMessage.header.messageType = MSG_BEACON_PING;
+  outgoingMessage.header.priority = PRIORITY_HIGH;
+  outgoingMessage.header.senderType = myBotType;
+  outgoingMessage.header.sequenceNumber = sequenceNumber++;
+  outgoingMessage.header.timestamp = millis();
+  
+  outgoingMessage.payload.localization.requestType = 2; // BeaconPing response
+  outgoingMessage.payload.localization.beaconTimestamp = beaconTimestamp;
+  outgoingMessage.payload.localization.responseTime = micros();
+  outgoingMessage.payload.localization.senderX = myPosition.x;
+  outgoingMessage.payload.localization.senderY = myPosition.y;
+  outgoingMessage.payload.localization.senderHeading = myPosition.heading;
+  
+  outgoingMessage.header.checksum = calculateChecksum((uint8_t*)&outgoingMessage, sizeof(SwarmMessage) - 1);
+  
+  esp_now_send(targetMac, (uint8_t*)&outgoingMessage, sizeof(SwarmMessage));
 }
