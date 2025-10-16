@@ -25,7 +25,7 @@
 
 ### Communication Flow
 
-```
+```txt
 ESP32 Bots (WHEELIE/SPEEDIE) 
     ↓ WiFi
 MICRO BOT (Raspberry Pi 3)
@@ -100,7 +100,7 @@ sudo nano /etc/hostapd/hostapd.conf
 
 ### Access Point Configuration (`/etc/hostapd/hostapd.conf`)
 
-```
+```txt
 interface=wlan0
 driver=nl80211
 ssid=JumboBot_Network
@@ -119,7 +119,7 @@ rsn_pairwise=CCMP
 
 ### DHCP Configuration (`/etc/dnsmasq.conf`)
 
-```
+```txt
 interface=wlan0
 dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 ```
@@ -128,7 +128,7 @@ dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
 
 Create systemd service file: `/etc/systemd/system/micro-bot.service`
 
-```
+```txt
 [Unit]
 Description=Micro Bot Bridge Server
 After=network.target
