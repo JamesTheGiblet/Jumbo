@@ -1,0 +1,21 @@
+# 🖥️ PC MCU Requirements
+# Python dependencies for Project Jumbo Control Center
+
+# Core dependencies
+websockets>=11.0.3
+asyncio-mqtt>=0.13.0
+
+# GUI Framework
+tkinter  # Usually included with Python
+
+# Data visualization
+matplotlib>=3.7.0
+numpy>=1.24.0
+
+# Additional utilities
+python-dateutil>=2.8.0
+pyserial>=3.5  # For potential direct serial communication
+requests>=2.31.0  # For HTTP API calls if needed
+
+# Development and debugging
+colorama>=0.4.6  # For colored terminal output
