@@ -4,7 +4,7 @@
 
 The **MICRO BOT** is a **Raspberry Pi 3 Model B v1.2** running as a **WiFi communication bridge** between your ESP32 swarm bots (WHEELIE/SPEEDIE) and PC. It creates a dedicated WiFi network for the bots and routes messages via WebSocket connections.
 
-```
+```txt
 ESP32 Bots ↔ WiFi ↔ MICRO BOT (Pi) ↔ Ethernet/WiFi ↔ PC
 ```
 
@@ -113,13 +113,13 @@ sudo journalctl -u micro-bot.service -f
 
 **ESP32 Bots connect to:**
 
-```
+```txt
 ws://192.168.4.1:8765
 ```
 
 **PC MCU connects to:**
 
-```
+```txt
 ws://192.168.4.1:8766
 ```
 

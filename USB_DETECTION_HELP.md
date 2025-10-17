@@ -1,8 +1,9 @@
 # 🔍 USB Detection Commands for Pi
 
-## You're now logged into the Pi directly! Here's how to find your USB:
+## You're now logged into the Pi directly! Here's how to find your USB
 
-### 1. Check if USB is detected:
+### 1. Check if USB is detected
+
 ```bash
 # List all block devices
 lsblk
@@ -14,14 +15,16 @@ lsusb
 sudo dmesg | tail -10
 ```
 
-### 2. Insert USB drive and check again:
+### 2. Insert USB drive and check again
+
 ```bash
 # After inserting USB, run:
 lsblk
 # Look for new device like sda, sda1, sdb, sdb1, etc.
 ```
 
-### 3. Mount the USB drive:
+### 3. Mount the USB drive
+
 ```bash
 # If USB shows as sda1 (most common):
 sudo mount /dev/sda1 /mnt/usb
@@ -34,7 +37,8 @@ ls /mnt/usb
 # You should see micro_bot_setup.zip
 ```
 
-### 4. Copy and install MICRO BOT:
+### 4. Copy and install MICRO BOT
+
 ```bash
 # Copy the setup file
 cp /mnt/usb/micro_bot_setup.zip ~/
@@ -70,7 +74,7 @@ sudo nano /etc/ssh/sshd_config
 sudo systemctl restart ssh
 ```
 
-## What to do next:
+## What to do next
 
 1. **Insert your USB drive** (with micro_bot_setup.zip on it)
 2. **Run `lsblk`** to see the new device (probably sda1)
