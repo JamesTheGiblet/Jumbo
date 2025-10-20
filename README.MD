@@ -503,6 +503,14 @@ Project Jumbo represents the convergence of multiple research threads:
 - **[🌐 SWARM_INTELLIGENCE_SYSTEM.md](docs/SWARM_INTELLIGENCE_SYSTEM.md)** - Multi-layer intelligence
 - **[🎛️ swarm_ecosystem_manager.md](docs/swarm_ecosystem_manager.md)** - Ecosystem management
 
+### Setup & Configuration
+
+- **[🚀 SETUP_COMPLETE.md](docs/SETUP_COMPLETE.md)** - Quick setup summary
+- **[🤖 MICRO_BOT_SETUP.md](docs/MICRO_BOT_SETUP.md)** - Raspberry Pi bridge setup
+- **[🖥️ PC_MCU_SETUP.md](docs/PC_MCU_SETUP.md)** - PC control center setup
+- **[⚙️ MICRO_BOT_CONFIG.md](docs/MICRO_BOT_CONFIG.md)** - Bridge configuration details
+- **[🎛️ PC_MCU_GUIDE.md](docs/PC_MCU_GUIDE.md)** - Control center usage guide
+
 ### Quick Start Guides
 
 - **[🔭 WHEELIE Quickstart](src/WHEELIE/QUICKSTART.md)** - Precision bot setup

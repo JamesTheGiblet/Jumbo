@@ -1,53 +1,46 @@
 #!/usr/bin/env python3
 """
-🖥️ PC MCU - Master Control Unit
-Complete PC application for managing WHEELIE, SPEEDIE, and MICRO BOT ecosystem
-
-Features:
-- Real-time bot monitoring and control
-- Mission planning and execution
-- Data collection and analysis
-- Swarm coordination
-- Performance analytics
-- Emergency protocols
-
-Author: Project Jumbo Team
-Version: 1.0.0
+PC MCU - Project Jumbo Control Center
+Central command and control application for the Jumbo Bot swarm ecosystem.
 """
-
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
 import asyncio
 import websockets
 import json
-import time
 import threading
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
-from datetime import datetime, timedelta
+from datetime import datetime
+from collections import deque
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import numpy as np
-from collections import defaultdict, deque
-import logging
+from matplotlib.figure import Figure
+import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('PC_MCU')
 
+@dataclass
 class BotData:
     """Data structure for bot information"""
-    def __init__(self, bot_id):
-        self.bot_id = bot_id
-        self.is_online = False
-        self.ip_address = ""
-        self.generation = 0
-        self.fitness_score = 0.0
-        self.last_seen = None
-        self.message_count = 0
-        self.performance_history = deque(maxlen=100)
-        self.emotional_state = {}
-        self.sensor_data = {}
-        self.capabilities = []
-        
+    bot_id: str
+    is_online: bool = False
+    ip_address: str = ""
+    generation: int = 0
+    fitness_score: float = 0.0
+    last_seen: Optional[datetime] = None
+    message_count: int = 0
+    performance_history: deque = field(default_factory=lambda: deque(maxlen=100))
+    emotional_state: Dict = field(default_factory=dict)
+    sensor_data: Dict = field(default_factory=dict)
+    capabilities: List = field(default_factory=list)
+    
     def update(self, data):
         """Update bot data from message"""
         self.generation = data.get('generation', self.generation)
@@ -64,79 +57,72 @@ class BotData:
             'generation': self.generation
         })
 
+@dataclass 
+class MissionData:
+    """Data structure for mission information"""
+    mission_id: str
+    mission_type: str
+    assigned_bots: List[str] = field(default_factory=list)
+    status: str = "pending"
+    progress: float = 0.0
+    created_at: datetime = field(default_factory=datetime.now)
+    parameters: Dict = field(default_factory=dict)
+
 class MissionPlanner:
     """Mission planning and execution system"""
+    
     def __init__(self):
-        self.active_missions = {}
-        self.mission_history = []
+        self.missions = {}
+        self.mission_counter = 0
         
-    def create_exploration_mission(self, bot_id, area_bounds, duration_minutes=10):
-        """Create an exploration mission"""
-        mission = {
-            'id': f"explore_{int(time.time())}",
-            'type': 'exploration',
-            'bot_id': bot_id,
-            'parameters': {
-                'area_bounds': area_bounds,
-                'duration': duration_minutes * 60,
-                'scan_resolution': 0.1,
-                'return_to_start': True
-            },
-            'status': 'pending',
-            'created_at': datetime.now(),
-            'expected_completion': datetime.now() + timedelta(minutes=duration_minutes)
-        }
-        self.active_missions[mission['id']] = mission
-        return mission
+    def create_mission(self, mission_type: str, bot_ids: List[str], parameters: Dict = None) -> str:
+        """Create a new mission"""
+        self.mission_counter += 1
+        mission_id = f"MISSION_{self.mission_counter:03d}"
         
-    def create_patrol_mission(self, bot_id, waypoints, cycles=1):
-        """Create a patrol mission"""
-        mission = {
-            'id': f"patrol_{int(time.time())}",
-            'type': 'patrol',
-            'bot_id': bot_id,
-            'parameters': {
-                'waypoints': waypoints,
-                'cycles': cycles,
-                'speed_mode': 'adaptive',
-                'obstacle_avoidance': True
-            },
-            'status': 'pending',
-            'created_at': datetime.now()
-        }
-        self.active_missions[mission['id']] = mission
-        return mission
+        mission = MissionData(
+            mission_id=mission_id,
+            mission_type=mission_type,
+            assigned_bots=bot_ids.copy(),
+            parameters=parameters or {}
+        )
         
-    def create_collaborative_mission(self, bot_ids, mission_type, parameters):
-        """Create a collaborative mission for multiple bots"""
-        mission = {
-            'id': f"collab_{mission_type}_{int(time.time())}",
-            'type': f"collaborative_{mission_type}",
-            'bot_ids': bot_ids,
-            'parameters': parameters,
-            'status': 'pending',
-            'created_at': datetime.now()
-        }
-        self.active_missions[mission['id']] = mission
-        return mission
+        self.missions[mission_id] = mission
+        logger.info(f"Created mission {mission_id}: {mission_type}")
+        return mission_id
+        
+    def get_mission(self, mission_id: str) -> Optional[MissionData]:
+        """Get mission by ID"""
+        return self.missions.get(mission_id)
+        
+    def update_mission_progress(self, mission_id: str, progress: float):
+        """Update mission progress"""
+        if mission_id in self.missions:
+            self.missions[mission_id].progress = progress
+            
+    def set_mission_status(self, mission_id: str, status: str):
+        """Set mission status"""
+        if mission_id in self.missions:
+            self.missions[mission_id].status = status
 
 class PCMCUApp:
     """Main PC MCU Application"""
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("🖥️ PC MCU - Project Jumbo Control Center")
-        self.root.geometry("1400x900")
+        self.root.title("PC MCU - Project Jumbo Control Center")
+        self.root.geometry("1200x800")
         
-        # Data structures
+        # Application state
         self.bots = {}
         self.mission_planner = MissionPlanner()
         self.websocket = None
         self.connected = False
+        self.running = True
         self.message_log = deque(maxlen=1000)
         
         # Connection settings
-        self.micro_bot_ip = "192.168.4.1"
+        self.micro_bot_ip = "192.168.1.207"  # Pi's current IP
         self.micro_bot_port = 8766
         
         # Initialize GUI
@@ -144,159 +130,153 @@ class PCMCUApp:
         
         # Start connection manager
         self.connection_thread = None
-        self.running = True
+        
+        # Setup periodic updates
+        self.root.after(1000, self.periodic_update)
+        self.root.after(5000, self.update_analytics)
         
     def setup_gui(self):
-        """Setup the GUI interface"""
-        # Create main notebook for tabs
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        """Set up the GUI"""
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill='both', expand=True, padx=5, pady=5)
         
-        # Connection Tab
-        self.setup_connection_tab(notebook)
+        # Create tabs
+        self.setup_connection_tab()
+        self.setup_monitoring_tab()
+        self.setup_missions_tab()
+        self.setup_analytics_tab()
+        self.setup_logs_tab()
         
-        # Monitoring Tab
-        self.setup_monitoring_tab(notebook)
+    def setup_connection_tab(self):
+        """Set up connection tab"""
+        self.connection_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.connection_frame, text="Connection")
         
-        # Mission Control Tab
-        self.setup_mission_tab(notebook)
+        # Connection controls
+        conn_controls = ttk.LabelFrame(self.connection_frame, text="MICRO BOT Connection")
+        conn_controls.pack(fill='x', padx=10, pady=10)
         
-        # Analytics Tab
-        self.setup_analytics_tab(notebook)
-        
-        # Logs Tab
-        self.setup_logs_tab(notebook)
-        
-        # Status bar
-        self.status_bar = ttk.Label(self.root, text="Disconnected", relief=tk.SUNKEN)
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-    def setup_connection_tab(self, notebook):
-        """Setup connection management tab"""
-        conn_frame = ttk.Frame(notebook)
-        notebook.add(conn_frame, text="🔗 Connection")
-        
-        # Connection settings
-        settings_frame = ttk.LabelFrame(conn_frame, text="Connection Settings")
-        settings_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Label(settings_frame, text="MICRO BOT IP:").grid(row=0, column=0, padx=5, pady=5)
-        self.ip_entry = ttk.Entry(settings_frame)
+        # IP and Port
+        ttk.Label(conn_controls, text="IP Address:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
+        self.ip_entry = ttk.Entry(conn_controls)
         self.ip_entry.insert(0, self.micro_bot_ip)
         self.ip_entry.grid(row=0, column=1, padx=5, pady=5)
         
-        ttk.Label(settings_frame, text="Port:").grid(row=0, column=2, padx=5, pady=5)
-        self.port_entry = ttk.Entry(settings_frame, width=10)
+        ttk.Label(conn_controls, text="Port:").grid(row=0, column=2, sticky='w', padx=5, pady=5)
+        self.port_entry = ttk.Entry(conn_controls, width=10)
         self.port_entry.insert(0, str(self.micro_bot_port))
         self.port_entry.grid(row=0, column=3, padx=5, pady=5)
         
-        self.connect_btn = ttk.Button(settings_frame, text="Connect", command=self.toggle_connection)
-        self.connect_btn.grid(row=0, column=4, padx=5, pady=5)
+        # Connect button
+        self.connect_btn = ttk.Button(conn_controls, text="Connect", command=self.connect)
+        self.connect_btn.grid(row=0, column=4, padx=10, pady=5)
         
         # Connection status
-        status_frame = ttk.LabelFrame(conn_frame, text="Status")
-        status_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        status_frame = ttk.LabelFrame(self.connection_frame, text="Connection Status")
+        status_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
         self.connection_status = scrolledtext.ScrolledText(status_frame, height=20)
-        self.connection_status.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.connection_status.pack(fill='both', expand=True, padx=5, pady=5)
         
-    def setup_monitoring_tab(self, notebook):
-        """Setup bot monitoring tab"""
-        monitor_frame = ttk.Frame(notebook)
-        notebook.add(monitor_frame, text="🤖 Monitoring")
+    def setup_monitoring_tab(self):
+        """Set up monitoring tab"""
+        self.monitoring_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.monitoring_frame, text="Monitoring")
         
         # Bot list
-        bots_frame = ttk.LabelFrame(monitor_frame, text="Connected Bots")
-        bots_frame.pack(fill=tk.X, padx=5, pady=5)
+        bot_frame = ttk.LabelFrame(self.monitoring_frame, text="Connected Bots")
+        bot_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
-        self.bot_tree = ttk.Treeview(bots_frame, columns=('status', 'generation', 'fitness', 'messages'), height=6)
+        # Bot tree
+        columns = ('Status', 'IP', 'Generation', 'Fitness', 'Messages', 'Last Seen')
+        self.bot_tree = ttk.Treeview(bot_frame, columns=columns, show='tree headings')
+        
         self.bot_tree.heading('#0', text='Bot ID')
-        self.bot_tree.heading('status', text='Status')
-        self.bot_tree.heading('generation', text='Generation')
-        self.bot_tree.heading('fitness', text='Fitness')
-        self.bot_tree.heading('messages', text='Messages')
-        self.bot_tree.pack(fill=tk.X, padx=5, pady=5)
+        for col in columns:
+            self.bot_tree.heading(col, text=col)
+            self.bot_tree.column(col, width=100)
+            
+        bot_scrollbar = ttk.Scrollbar(bot_frame, orient='vertical', command=self.bot_tree.yview)
+        self.bot_tree.configure(yscrollcommand=bot_scrollbar.set)
         
-        # Bot details
-        details_frame = ttk.LabelFrame(monitor_frame, text="Bot Details")
-        details_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.bot_tree.pack(side='left', fill='both', expand=True)
+        bot_scrollbar.pack(side='right', fill='y')
         
-        self.bot_details = scrolledtext.ScrolledText(details_frame, height=15)
-        self.bot_details.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+    def setup_missions_tab(self):
+        """Set up missions tab"""
+        self.missions_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.missions_frame, text="Missions")
         
-        # Bind tree selection
-        self.bot_tree.bind('<<TreeviewSelect>>', self.on_bot_select)
-        
-    def setup_mission_tab(self, notebook):
-        """Setup mission control tab"""
-        mission_frame = ttk.Frame(notebook)
-        notebook.add(mission_frame, text="🎯 Missions")
-        
-        # Mission creation
-        create_frame = ttk.LabelFrame(mission_frame, text="Create Mission")
-        create_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Mission controls
+        controls_frame = ttk.LabelFrame(self.missions_frame, text="Mission Control")
+        controls_frame.pack(fill='x', padx=10, pady=10)
         
         # Mission type selection
-        ttk.Label(create_frame, text="Mission Type:").grid(row=0, column=0, padx=5, pady=5)
-        self.mission_type = ttk.Combobox(create_frame, values=['Exploration', 'Patrol', 'Collaborative Search'])
+        ttk.Label(controls_frame, text="Mission Type:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
+        self.mission_type = ttk.Combobox(controls_frame, values=[
+            'exploration', 'formation', 'patrol', 'gather', 'emergency'
+        ])
         self.mission_type.grid(row=0, column=1, padx=5, pady=5)
+        self.mission_type.set('exploration')
         
-        ttk.Label(create_frame, text="Target Bot:").grid(row=0, column=2, padx=5, pady=5)
-        self.target_bot = ttk.Combobox(create_frame, values=[])
-        self.target_bot.grid(row=0, column=3, padx=5, pady=5)
+        # Create mission button
+        ttk.Button(controls_frame, text="Create Mission", command=self.create_mission).grid(row=0, column=2, padx=10, pady=5)
         
-        ttk.Button(create_frame, text="Create Mission", command=self.create_mission).grid(row=0, column=4, padx=5, pady=5)
+        # Mission list
+        mission_frame = ttk.LabelFrame(self.missions_frame, text="Active Missions")
+        mission_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Active missions
-        active_frame = ttk.LabelFrame(mission_frame, text="Active Missions")
-        active_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        mission_columns = ('Type', 'Assigned Bots', 'Status', 'Progress')
+        self.mission_tree = ttk.Treeview(mission_frame, columns=mission_columns, show='tree headings')
         
-        self.mission_tree = ttk.Treeview(active_frame, columns=('type', 'bot', 'status', 'progress'), height=10)
         self.mission_tree.heading('#0', text='Mission ID')
-        self.mission_tree.heading('type', text='Type')
-        self.mission_tree.heading('bot', text='Bot')
-        self.mission_tree.heading('status', text='Status')
-        self.mission_tree.heading('progress', text='Progress')
-        self.mission_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        for col in mission_columns:
+            self.mission_tree.heading(col, text=col)
+            self.mission_tree.column(col, width=150)
+            
+        mission_scrollbar = ttk.Scrollbar(mission_frame, orient='vertical', command=self.mission_tree.yview)
+        self.mission_tree.configure(yscrollcommand=mission_scrollbar.set)
         
-    def setup_analytics_tab(self, notebook):
-        """Setup analytics and visualization tab"""
-        analytics_frame = ttk.Frame(notebook)
-        notebook.add(analytics_frame, text="📊 Analytics")
+        self.mission_tree.pack(side='left', fill='both', expand=True)
+        mission_scrollbar.pack(side='right', fill='y')
+        
+    def setup_analytics_tab(self):
+        """Set up analytics tab"""
+        self.analytics_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.analytics_frame, text="Analytics")
         
         # Create matplotlib figure
-        self.fig, ((self.ax1, self.ax2), (self.ax3, self.ax4)) = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle('Project Jumbo Analytics Dashboard')
+        self.fig = Figure(figsize=(12, 8), dpi=80)
         
-        # Embed in tkinter
-        self.canvas = FigureCanvasTkAgg(self.fig, analytics_frame)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        # Create subplots
+        self.ax1 = self.fig.add_subplot(221)
+        self.ax2 = self.fig.add_subplot(222) 
+        self.ax3 = self.fig.add_subplot(223)
+        self.ax4 = self.fig.add_subplot(224)
         
-        # Update analytics every 5 seconds
-        self.root.after(5000, self.update_analytics)
+        # Create canvas
+        self.canvas = FigureCanvasTkAgg(self.fig, self.analytics_frame)
+        self.canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=10)
         
-    def setup_logs_tab(self, notebook):
-        """Setup logs tab"""
-        logs_frame = ttk.Frame(notebook)
-        notebook.add(logs_frame, text="📝 Logs")
-        
-        # Log controls
-        controls_frame = ttk.Frame(logs_frame)
-        controls_frame.pack(fill=tk.X, padx=5, pady=5)
-        
-        ttk.Button(controls_frame, text="Clear Logs", command=self.clear_logs).pack(side=tk.LEFT, padx=5)
-        ttk.Button(controls_frame, text="Save Logs", command=self.save_logs).pack(side=tk.LEFT, padx=5)
+    def setup_logs_tab(self):
+        """Set up logs tab"""
+        self.logs_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.logs_frame, text="Logs")
         
         # Log display
-        self.log_display = scrolledtext.ScrolledText(logs_frame)
-        self.log_display.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        log_frame = ttk.LabelFrame(self.logs_frame, text="System Logs")
+        log_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
-    def toggle_connection(self):
-        """Toggle connection to MICRO BOT"""
-        if self.connected:
-            self.disconnect()
-        else:
-            self.connect()
+        self.log_display = scrolledtext.ScrolledText(log_frame)
+        self.log_display.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Log controls
+        controls = ttk.Frame(log_frame)
+        controls.pack(fill='x', padx=5, pady=5)
+        
+        ttk.Button(controls, text="Clear Logs", command=self.clear_logs).pack(side='left', padx=5)
+        ttk.Button(controls, text="Export Logs", command=self.export_logs).pack(side='left', padx=5)
             
     def connect(self):
         """Connect to MICRO BOT"""
@@ -335,7 +315,8 @@ class PCMCUApp:
             await self.listen_for_messages()
             
         except Exception as e:
-            self.root.after(0, lambda: self.update_connection_status(f"❌ Connection failed: {e}"))
+            error_msg = str(e)
+            self.root.after(0, lambda: self.update_connection_status(f"❌ Connection failed: {error_msg}"))
             self.connected = False
             
     async def listen_for_messages(self):
@@ -377,139 +358,83 @@ class PCMCUApp:
             
         # Update bot data and display
         for bot_data in bots_data:
-            bot_id = bot_data.get('bot_id', 'Unknown')
+            bot_id = bot_data.get('bot_id', 'unknown')
             
+            # Update or create bot data
             if bot_id not in self.bots:
-                self.bots[bot_id] = BotData(bot_id)
+                self.bots[bot_id] = BotData(bot_id=bot_id)
                 
             bot = self.bots[bot_id]
-            bot.is_online = bot_data.get('is_online', False)
-            bot.ip_address = bot_data.get('ip_address', '')
-            bot.generation = bot_data.get('generation', 0)
-            bot.fitness_score = bot_data.get('fitness_score', 0.0)
-            bot.message_count = bot_data.get('message_count', 0)
+            bot.update(bot_data)
             
-            # Add to tree
+            # Update tree display
             status = "🟢 Online" if bot.is_online else "🔴 Offline"
+            last_seen = bot.last_seen.strftime('%H:%M:%S') if bot.last_seen else "Never"
+            
             self.bot_tree.insert('', 'end', text=bot_id, values=(
-                status, bot.generation, f"{bot.fitness_score:.3f}", bot.message_count
+                status, bot.ip_address, bot.generation, 
+                f"{bot.fitness_score:.1f}", bot.message_count, last_seen
             ))
             
-        # Update mission target bot combobox
-        online_bots = [bot_id for bot_id, bot in self.bots.items() if bot.is_online]
-        self.target_bot['values'] = online_bots
-        
     def handle_bot_message(self, data):
-        """Handle bot message"""
-        bot_id = data.get('bot_id', 'Unknown')
-        if bot_id in self.bots:
-            self.bots[bot_id].update(data.get('data', {}))
+        """Handle individual bot messages"""
+        bot_id = data.get('bot_id')
+        if bot_id and bot_id in self.bots:
+            self.bots[bot_id].update(data)
             
     def handle_status_update(self, data):
-        """Handle status update"""
-        connected_bots = data.get('connected_bots', 0)
+        """Handle status updates from bridge"""
+        bots_data = data.get('bots', [])
+        if bots_data:
+            self.update_bot_list(bots_data)
+            
+        # Log system stats
+        stats = data.get('stats', {})
         uptime = data.get('uptime', 0)
-        self.status_bar.config(text=f"Connected: {connected_bots} bots | Uptime: {uptime:.1f}s")
+        self.log_message(f"Bridge uptime: {uptime:.1f}s, Messages processed: {stats.get('messages_processed', 0)}")
         
     def handle_bot_offline(self, data):
-        """Handle bot offline notification"""
-        bot_id = data.get('bot_id', 'Unknown')
-        if bot_id in self.bots:
+        """Handle bot going offline"""
+        bot_id = data.get('bot_id')
+        if bot_id and bot_id in self.bots:
             self.bots[bot_id].is_online = False
-        self.log_message(f"🔴 Bot {bot_id} went offline")
-        
-    def on_bot_select(self, event):
-        """Handle bot selection in tree"""
-        selection = self.bot_tree.selection()
-        if selection:
-            bot_id = self.bot_tree.item(selection[0])['text']
-            if bot_id in self.bots:
-                self.display_bot_details(self.bots[bot_id])
-                
-    def display_bot_details(self, bot):
-        """Display detailed bot information"""
-        self.bot_details.delete('1.0', tk.END)
-        
-        details = f"""Bot ID: {bot.bot_id}
-Status: {'🟢 Online' if bot.is_online else '🔴 Offline'}
-IP Address: {bot.ip_address}
-Generation: {bot.generation}
-Fitness Score: {bot.fitness_score:.6f}
-Message Count: {bot.message_count}
-Last Seen: {bot.last_seen.strftime('%Y-%m-%d %H:%M:%S') if bot.last_seen else 'Never'}
-
-Emotional State:
-"""
-        
-        for emotion, value in bot.emotional_state.items():
-            details += f"  {emotion}: {value}\n"
             
-        details += "\nSensor Data:\n"
-        for sensor, value in bot.sensor_data.items():
-            details += f"  {sensor}: {value}\n"
-            
-        self.bot_details.insert('1.0', details)
-        
     def create_mission(self):
         """Create a new mission"""
         mission_type = self.mission_type.get()
-        target_bot = self.target_bot.get()
+        selected_bots = []
         
-        if not mission_type or not target_bot:
-            messagebox.showwarning("Warning", "Please select mission type and target bot")
+        # Get selected bots from tree
+        for item in self.bot_tree.selection():
+            bot_id = self.bot_tree.item(item)['text']
+            selected_bots.append(bot_id)
+            
+        if not selected_bots:
+            # Use all online bots if none selected
+            selected_bots = [bot_id for bot_id, bot in self.bots.items() if bot.is_online]
+            
+        if not selected_bots:
+            messagebox.showwarning("No Bots", "No bots available for mission")
             return
             
-        if mission_type == "Exploration":
-            mission = self.mission_planner.create_exploration_mission(
-                target_bot, 
-                area_bounds=[(0, 0), (10, 10)],  # Default 10x10 area
-                duration_minutes=5
-            )
-        elif mission_type == "Patrol":
-            mission = self.mission_planner.create_patrol_mission(
-                target_bot,
-                waypoints=[(0, 0), (5, 0), (5, 5), (0, 5)],  # Square patrol
-                cycles=2
-            )
-        else:
-            messagebox.showinfo("Info", "Collaborative missions not yet implemented")
-            return
-            
-        # Send mission to bot via MICRO BOT
-        if self.connected:
-            asyncio.run_coroutine_threadsafe(
-                self.send_mission(mission), 
-                asyncio.get_event_loop()
-            )
-            
+        mission_id = self.mission_planner.create_mission(mission_type, selected_bots)
         self.update_mission_display()
-        self.log_message(f"📋 Created {mission_type} mission for {target_bot}")
+        self.log_message(f"Created mission {mission_id} with {len(selected_bots)} bots")
         
-    async def send_mission(self, mission):
-        """Send mission to bot"""
-        if self.websocket:
-            message = {
-                'type': 'mission',
-                'target_bot': mission['bot_id'],
-                'mission_data': mission,
-                'timestamp': time.time()
-            }
-            await self.websocket.send(json.dumps(message))
-            
     def update_mission_display(self):
         """Update mission display"""
-        # Clear existing items
+        # Clear existing missions
         for item in self.mission_tree.get_children():
             self.mission_tree.delete(item)
             
-        # Add active missions
-        for mission_id, mission in self.mission_planner.active_missions.items():
-            bot_id = mission.get('bot_id', mission.get('bot_ids', ['Multiple']))
+        # Add current missions
+        for mission_id, mission in self.mission_planner.missions.items():
+            bot_id = mission.assigned_bots
             if isinstance(bot_id, list):
                 bot_id = ', '.join(bot_id)
                 
             self.mission_tree.insert('', 'end', text=mission_id, values=(
-                mission['type'], bot_id, mission['status'], "0%"
+                mission.mission_type, bot_id, mission.status, f"{mission.progress:.0f}%"
             ))
             
     def update_analytics(self):
@@ -560,6 +485,25 @@ Emotional State:
         # Schedule next update
         self.root.after(5000, self.update_analytics)
         
+    def periodic_update(self):
+        """Periodic update for GUI elements"""
+        if self.connected and self.websocket:
+            # Request bot list update
+            async def send_requests():
+                await asyncio.sleep(0.1)
+                await self.websocket.send(json.dumps({'type': 'command', 'command': 'get_bots'}))
+                
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop, skip this update
+                pass
+            else:
+                asyncio.run_coroutine_threadsafe(send_requests(), loop)
+            
+        # Schedule next update
+        self.root.after(10000, self.periodic_update)
+        
     def update_connection_status(self, message):
         """Update connection status display"""
         timestamp = datetime.now().strftime('%H:%M:%S')
@@ -567,54 +511,39 @@ Emotional State:
         self.connection_status.see(tk.END)
         
     def log_message(self, message):
-        """Log message to display"""
-        self.log_display.insert(tk.END, f"{message}\n")
+        """Log a message"""
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        log_entry = f"[{timestamp}] {message}\n"
+        self.log_display.insert(tk.END, log_entry)
         self.log_display.see(tk.END)
+        logger.info(message)
         
     def clear_logs(self):
         """Clear log display"""
-        self.log_display.delete('1.0', tk.END)
-        self.message_log.clear()
+        self.log_display.delete(1.0, tk.END)
         
-    def save_logs(self):
-        """Save logs to file"""
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"pc_mcu_logs_{timestamp}.txt"
-        
+    def export_logs(self):
+        """Export logs to file"""
         try:
+            filename = f"jumbo_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             with open(filename, 'w') as f:
-                for log_entry in self.message_log:
-                    f.write(f"{log_entry}\n")
-            messagebox.showinfo("Success", f"Logs saved to {filename}")
+                f.write(self.log_display.get(1.0, tk.END))
+            self.log_message(f"Logs exported to {filename}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save logs: {e}")
+            self.log_message(f"Failed to export logs: {e}")
             
+    def run(self):
+        """Run the application"""
+        self.log_message("PC MCU Control Center started")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.mainloop()
+        
     def on_closing(self):
         """Handle application closing"""
         self.running = False
-        if self.connected:
-            self.disconnect()
-        self.root.destroy()
-        
-    def run(self):
-        """Run the application"""
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
-        # Request initial data if connected
-        if self.connected:
-            self.root.after(1000, self.request_initial_data)
-            
-        self.root.mainloop()
-        
-    def request_initial_data(self):
-        """Request initial data from MICRO BOT"""
         if self.connected and self.websocket:
-            async def send_requests():
-                await self.websocket.send(json.dumps({'type': 'command', 'command': 'get_status'}))
-                await asyncio.sleep(0.1)
-                await self.websocket.send(json.dumps({'type': 'command', 'command': 'get_bots'}))
-                
-            asyncio.run_coroutine_threadsafe(send_requests(), asyncio.get_event_loop())
+            asyncio.run_coroutine_threadsafe(self.websocket.close(), asyncio.get_event_loop())
+        self.root.destroy()
 
 def main():
     """Main function"""
