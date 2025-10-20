@@ -1,0 +1,381 @@
+/*
+🧬 Project Jumbo: WHEELIE Bot ECS v2.0 Integration Example
+Integration of Evolutionary Code System into WHEELIE bot main.cpp
+
+This demonstrates how to integrate ECS v2.0 into the existing WHEELIE bot code,
+enabling autonomous evolution of movement parameters, sensor thresholds, and
+behavioral strategies through intelligent mutation and fitness evaluation.
+
+Key Integration Points:
+- Parameter registration for evolution
+- Performance metric reporting
+- Error handling and reporting
+- Automatic evolution triggers
+- Real-time parameter updates
+*/
+
+// Add ECS integration to existing WHEELIE includes
+#include "ecs_integration.h"
+
+// Add to existing WHEELIE setup() function - INSERT AFTER WiFi/ESP-NOW initialization
+void setup() {
+    // ... existing WHEELIE setup code ...
+    
+    // 🧬 Initialize ECS Integration
+    Serial.println("\n🧬 Initializing ECS v2.0 for WHEELIE...");
+    
+    // Set ECS coordinator (MICRO_BOT bridge) MAC address
+    uint8_t coordinator_mac[] = {0xC8, 0xC9, 0xA3, 0xCA, 0xFE, 0x01}; // Update with actual bridge MAC
+    
+    if (ecs.initialize(coordinator_mac)) {
+        Serial.println("✅ ECS Integration initialized successfully");
+        
+        // 🎯 Register evolvable parameters using context helpers
+        ECSContext::MovementContext::registerParameters();
+        ECSContext::SensorContext::registerParameters(); 
+        ECSContext::CommunicationContext::registerParameters();
+        
+        // Register custom WHEELIE-specific parameters
+        ecs.registerParameter("aggressiveBackupMultiplier", 2, 1, 5);
+        ecs.registerParameter("spinDegreesWhenTrapped", 180, 90, 360);
+        ecs.registerParameter("explorationCuriosity", 70, 30, 100);
+        ecs.registerParameter("signalGenerationRate", 50, 10, 100);
+        
+        Serial.println("📝 All WHEELIE parameters registered for evolution");
+        
+        // Set initial parameter values from ECS (in case we have evolved values)
+        genome.motorSpeed = ECS_GET_PARAM("motorSpeed");
+        genome.turnSpeed = ECS_GET_PARAM("turnSpeed");
+        genome.obstacleThreshold = ECS_GET_PARAM("obstacleThreshold");
+        genome.backupDuration = ECS_GET_PARAM("backupDuration");
+        genome.turnDuration = ECS_GET_PARAM("turnDuration");
+        genome.clearThreshold = ECS_GET_PARAM("clearThreshold");
+        
+        Serial.println("🔧 Parameters loaded from ECS");
+    } else {
+        Serial.println("❌ ECS initialization failed - continuing without evolution");
+    }
+    
+    // ... rest of existing setup code ...
+}
+
+// Add to existing WHEELIE loop() function - INSERT AT BEGINNING
+void loop() {
+    // 🧬 ECS Update (must be called regularly)
+    ecs.update();
+    
+    // Performance monitoring wrapper for main loop
+    ECS_START_TIMING();
+    
+    // ... existing WHEELIE loop code continues here ...
+    
+    // Example ECS integration points throughout existing code:
+    
+    // 1. Enhanced sensor reading with ECS reporting
+    VL53L0X_RangingMeasurementData_t measure;
+    lox.rangingTest(&measure, false);
+    
+    if (measure.RangeStatus != 4) {
+        distance_cm = measure.RangeMilliMeter / 10;
+        ECS_REPORT_METRIC(METRIC_SENSOR_ACCURACY, 1.0);  // Successful reading
+    } else {
+        distance_cm = -1;
+        ECS_REPORT_METRIC(METRIC_SENSOR_ACCURACY, 0.0);  // Failed reading
+        ECS_REPORT_ERROR(ERROR_WARNING, 2001, "Sensor out of range");
+    }
+    
+    // 2. Enhanced movement with collision detection
+    if (distance_cm > 0 && distance_cm < ECS_GET_PARAM("obstacleThreshold")) {
+        // Obstacle detected - report collision avoidance metric
+        ECS_REPORT_METRIC(METRIC_COLLISION_AVOIDANCE, 1.0);
+        ECSContext::MovementContext::reportCollision();
+        
+        // Execute avoidance with evolved parameters
+        executeAvoidanceManeuver();
+    } else if (distance_cm > ECS_GET_PARAM("clearThreshold")) {
+        // Clear path - move forward
+        moveForward(ECS_GET_PARAM("motorSpeed"));
+        ECS_REPORT_METRIC(METRIC_MOVEMENT_EFFICIENCY, 1.0);
+    }
+    
+    // 3. Enhanced communication with success reporting
+    if (shouldSendSignal()) {
+        bool success = sendEmergentSignal();
+        if (success) {
+            ECSContext::CommunicationContext::reportMessageSuccess();
+        } else {
+            ECSContext::CommunicationContext::reportMessageFailure();
+        }
+    }
+    
+    // 4. Task completion tracking
+    static unsigned long taskStartTime = 0;
+    static bool taskInProgress = false;
+    
+    if (isStartingNewTask()) {
+        taskStartTime = millis();
+        taskInProgress = true;
+    }
+    
+    if (taskInProgress && isTaskCompleted()) {
+        unsigned long taskDuration = millis() - taskStartTime;
+        taskInProgress = false;
+        
+        // Report task completion metrics
+        ECS_REPORT_METRIC(METRIC_TASK_COMPLETION, 1.0);
+        ECSContext::MovementContext::reportSuccessfulNavigation(taskDuration);
+        
+        // Calculate and report energy efficiency
+        float energyEfficiency = calculateEnergyEfficiency(taskDuration);
+        ECS_REPORT_METRIC(METRIC_ENERGY_EFFICIENCY, energyEfficiency);
+    }
+    
+    // 5. Automatic evolution trigger based on performance
+    static AutoEvolutionTrigger evolutionTrigger;
+    if (evolutionTrigger.shouldTriggerEvolution()) {
+        ecs.requestEvolution("Performance-based trigger");
+    }
+    
+    // End performance timing
+    ECS_END_TIMING(METRIC_ADAPTATION_SPEED);
+    
+    // ... rest of existing loop code ...
+}
+
+// Enhanced movement functions with ECS integration
+void executeAvoidanceManeuver() {
+    ECS_TRY_CATCH({
+        // Get evolved parameters
+        int backupTime = ECS_GET_PARAM("backupDuration");
+        int turnTime = ECS_GET_PARAM("turnDuration");
+        int backupSpeed = ECS_GET_PARAM("turnSpeed");
+        
+        // Enhanced backup with evolved aggressive multiplier
+        int aggressiveMultiplier = ECS_GET_PARAM("aggressiveBackupMultiplier");
+        if (genome.failureCount > 3) {  // If stuck frequently, be more aggressive
+            backupTime *= aggressiveMultiplier;
+        }
+        
+        // Execute maneuver
+        moveBackward(backupSpeed, backupTime);
+        delay(100);
+        
+        // Evolved turn angle when trapped
+        int turnAngle = ECS_GET_PARAM("spinDegreesWhenTrapped");
+        if (genome.failureCount > 5) {
+            // If really stuck, use full evolved spin angle
+            turnRight(ECS_GET_PARAM("turnSpeed"), (turnAngle * turnTime) / 180);
+        } else {
+            // Normal turn
+            turnRight(ECS_GET_PARAM("turnSpeed"), turnTime);
+        }
+        
+        // Report successful avoidance
+        genome.successCount++;
+        ECS_REPORT_METRIC(METRIC_COLLISION_AVOIDANCE, 1.0);
+        
+    }, "Avoidance maneuver failed");
+}
+
+// Enhanced signal generation with evolved parameters
+bool sendEmergentSignal() {
+    ECS_TRY_CATCH({
+        // Use evolved signal generation rate
+        int signalRate = ECS_GET_PARAM("signalGenerationRate");
+        
+        // Adapt signal strength based on context
+        Context currentContext = detectCurrentContext();
+        EmergentSignal signal = signalGenerator.generateContextualSignal(currentContext);
+        
+        // Adjust signal based on evolved curiosity level
+        int curiosity = ECS_GET_PARAM("explorationCuriosity");
+        if (curiosity > 80) {
+            signal.addExplorationMarker();
+        }
+        
+        // Send signal
+        bool success = signal.transmit();
+        
+        if (success) {
+            ECS_REPORT_METRIC(METRIC_COMMUNICATION_SUCCESS, 1.0);
+            return true;
+        } else {
+            ECS_REPORT_ERROR(ERROR_WARNING, 3001, "Signal transmission failed");
+            return false;
+        }
+        
+    }, "Signal generation failed");
+    
+    return false;
+}
+
+// Energy efficiency calculation
+float calculateEnergyEfficiency(unsigned long taskDuration) {
+    // Simple efficiency metric: inverse of time + battery consideration
+    float timeEfficiency = 10000.0 / max(1000UL, taskDuration);  // Higher efficiency for faster tasks
+    
+    // Battery level consideration (if available)
+    float batteryLevel = 1.0;  // Placeholder - would read actual battery level
+    
+    // Movement smoothness (fewer direction changes = more efficient)
+    float smoothness = 1.0 - (float)genome.failureCount / max(1UL, genome.successCount);
+    
+    return min(1.0f, (timeEfficiency * batteryLevel * smoothness) / 100.0f);
+}
+
+// Task detection helpers
+bool isStartingNewTask() {
+    static int lastDistance = 0;
+    int currentDistance = distance_cm;
+    
+    // Task starts when we encounter a new obstacle or start moving after being still
+    if (abs(currentDistance - lastDistance) > 50) {
+        lastDistance = currentDistance;
+        return true;
+    }
+    return false;
+}
+
+bool isTaskCompleted() {
+    // Task completed when we successfully navigate past an obstacle
+    return (distance_cm > ECS_GET_PARAM("clearThreshold")) && (millis() % 5000 < 100);
+}
+
+bool shouldSendSignal() {
+    static unsigned long lastSignalTime = 0;
+    unsigned long now = millis();
+    
+    // Use evolved signal generation rate
+    int signalRate = ECS_GET_PARAM("signalGenerationRate");
+    unsigned long signalInterval = 60000 / max(1, signalRate);  // Convert rate to interval
+    
+    return (now - lastSignalTime > signalInterval);
+}
+
+// Enhanced ESP-NOW callback with ECS integration
+void onESPNowReceive(const uint8_t * mac, const uint8_t *incomingData, int len) {
+    // Handle ECS messages
+    ecs.handleESPNowMessage(mac, incomingData, len);
+    
+    // ... existing ESP-NOW handling code ...
+    
+    // Example: Handle parameter updates from ECS
+    if (len > 0 && incomingData[0] == '{') {
+        // JSON message - could be ECS parameter update
+        DynamicJsonDocument doc(256);
+        DeserializationError error = deserializeJson(doc, (const char*)incomingData, len);
+        
+        if (!error) {
+            const char* type = doc["type"];
+            if (type && strcmp(type, "parameter_update") == 0) {
+                const char* param = doc["parameter"];
+                int value = doc["value"];
+                
+                if (param && ecs.setParameter(param, value)) {
+                    // Update local variables with new evolved values
+                    updateLocalParametersFromECS();
+                    
+                    // Acknowledge the update
+                    ecs.reportEvolutionResult(true, 0.0);  // Fitness delta calculated later
+                    Serial.printf("🔧 ECS parameter updated: %s = %d\n", param, value);
+                }
+            }
+        }
+    }
+}
+
+// Update local parameters from ECS evolved values
+void updateLocalParametersFromECS() {
+    // Update genome with evolved parameters
+    genome.motorSpeed = ECS_GET_PARAM("motorSpeed");
+    genome.turnSpeed = ECS_GET_PARAM("turnSpeed");
+    genome.obstacleThreshold = ECS_GET_PARAM("obstacleThreshold");
+    genome.clearThreshold = ECS_GET_PARAM("clearThreshold");
+    genome.backupDuration = ECS_GET_PARAM("backupDuration");
+    genome.turnDuration = ECS_GET_PARAM("turnDuration");
+    genome.aggressiveBackupMultiplier = ECS_GET_PARAM("aggressiveBackupMultiplier");
+    genome.spinDegreesWhenTrapped = ECS_GET_PARAM("spinDegreesWhenTrapped");
+    
+    // Update signal generation parameters
+    // (These would be used in your signal generation code)
+    
+    Serial.println("✅ Local parameters updated from ECS evolution");
+}
+
+// Periodic status reporting to ECS
+void reportPerformanceToECS() {
+    static unsigned long lastReport = 0;
+    unsigned long now = millis();
+    
+    if (now - lastReport > 30000) {  // Report every 30 seconds
+        // Calculate current fitness score
+        ecs.reportMetric(METRIC_TASK_COMPLETION, 
+                        (float)genome.successCount / max(1UL, genome.successCount + genome.failureCount));
+        
+        // Send comprehensive performance report
+        ecs.sendPerformanceReport();
+        
+        // Send error report if there are errors
+        if (ecs.getErrorCount() > 0) {
+            ecs.sendErrorReport();
+        }
+        
+        lastReport = now;
+    }
+}
+
+// Add this call to your main loop() function
+void loop() {
+    ecs.update();
+    ECS_START_TIMING();
+    
+    // ... existing loop code ...
+    
+    // Add performance reporting
+    reportPerformanceToECS();
+    
+    ECS_END_TIMING(METRIC_ADAPTATION_SPEED);
+}
+
+/*
+🧬 ECS v2.0 Integration Summary for WHEELIE:
+
+✅ Parameter Evolution:
+- Movement: motorSpeed, turnSpeed, backupDuration, turnDuration
+- Sensors: obstacleThreshold, clearThreshold, sensorSensitivity
+- Behavior: aggressiveBackupMultiplier, spinDegreesWhenTrapped, explorationCuriosity
+- Communication: signalGenerationRate, signalStrength
+
+✅ Performance Metrics:
+- Task completion rate
+- Energy efficiency
+- Communication success rate
+- Collision avoidance
+- Sensor accuracy
+- Movement efficiency
+
+✅ Automatic Evolution Triggers:
+- Performance degradation
+- High error rates
+- Fitness stagnation
+- Manual triggers from PC
+
+✅ Real-time Updates:
+- Parameters updated via ESP-NOW from ECS bridge
+- Performance metrics reported continuously
+- Error logging and analysis
+- Evolution result feedback
+
+To integrate into existing WHEELIE code:
+1. Include ecs_integration.h and ecs_integration.cpp
+2. Add ECS initialization to setup()
+3. Add ecs.update() to loop()
+4. Replace hardcoded parameters with ECS_GET_PARAM() calls
+5. Add ECS_REPORT_METRIC() calls throughout performance-critical code
+6. Use ECS_REPORT_ERROR() for error handling
+7. Update ESP-NOW callback to handle ECS messages
+
+This creates a fully autonomous, self-evolving robotic swarm where each bot
+continuously optimizes its behavior based on environmental feedback and
+performance metrics!
+*/
